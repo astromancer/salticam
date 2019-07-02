@@ -1,0 +1,13 @@
+.idea/
+
+*.kate-swp
+*~
+
+# Byte-compiled / optimized / DLL files
+__pycache__/ # at any depth
+*.py[cod]
+
+
+*.bak
+test.py
+
