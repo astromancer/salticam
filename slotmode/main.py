@@ -124,7 +124,8 @@ from salticam.slotmode import _pprint_header, _check_channels, \
     get_bad_pixel_mask
 from salticam.slotmode.tracking import SlotModeTracker
 from salticam.slotmode.modelling.image import (FrameTransferBleed,
-                                               SlotModeBackground)
+                                               SlotModeBackground,
+                                               SlotModeBackground_V2)
 from graphical.imagine import ImageDisplay
 from graphical.multitab import MplMultiTab
 from recipes.dict import AttrReadItem
@@ -999,7 +1000,7 @@ if __name__ == '__main__':
             # since the background structure can be smoothed out if the
             # shifts between frames are significant.
 
-            splineBG, _ = SlotModeBackground.from_image(mean_image_masked,
+            splineBG, _ = SlotModeBackground_V2.from_image(mean_image_masked,
                                                         args.channel,
                                                         SPLINE_ORDERS,
                                                         detection=None,
@@ -1112,7 +1113,7 @@ if __name__ == '__main__':
                     #  minimizers. This is a good option to choose when fitting
                     #  the sample images that are relatively smooth due to the
                     #  noise filtering effect of averaging multiple frames
-                    #  together.  However, the algorithm is exquisitely sensitive
+                    #  together. However, the algorithm is exquisitely sensitive
                     #  to outliers such as can be introduced by cosmic ray hits.
                     #  For subtracting the background on individual frames it is
                     #  far better to choose BFGS algorithm which is more
@@ -1155,7 +1156,7 @@ if __name__ == '__main__':
                 # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 if args.plot:
                     display(seg_deep, f'Segmentation (round {count})')
-                    display(mean_residuals, f'Residuals (round {count})')
+                    display(mean_residuals, f'Mean Residuals (round {count})')
 
                 # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

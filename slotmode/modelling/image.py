@@ -478,6 +478,162 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
         SegmentedImageModel.__init__(self, self.get_segmented_image(),
                                      list(self.models))
 
+    @classmethod
+    def from_image(cls, image, channel, orders, detection=None,
+                   plot=False, **detect_opts):
+        #
+        """
+        Construct a Spline2D instance from an image and polynomial
+        multi-order.  Position of the knots will be estimated based on the
+        median cross sections of the image. Objects (stars) in the image
+        will be identified using threshold detection algorithm.
+
+        Parameters
+        ----------
+        image
+        channel
+        orders
+        detection
+
+
+        Returns
+        -------
+
+        """
+
+        #
+        knots = cls.guess_knots(image, channel, plot=plot)
+        mdl = cls(orders, knots)
+        # mdl.groups['spline2d'] = mdl.segm.labels
+
+        # Detect objects & segment image
+        if detection is True or detect_opts:
+            from obstools.phot.segmentation import SegmentationHelper
+            detection = SegmentationHelper.detect
+
+        if detection not in (None, False):
+            seg = detection(image, False, None, **detect_opts)
+        else:
+            seg = mdl.segm
+
+        return mdl, seg
+
+    @staticmethod
+    def guess_knots(image, channel, δσ=3, n_knots=(1, 2), edges=True,
+                    offsets=(0, 0), plot=False):
+        """
+        A fast estimate of spline knot positions from a SALTICAM image by
+        sigma-thresholding the point to point gradient of the cross sectional
+        image median.
+
+        Parameters
+        ----------
+        image:  array
+            SALTICAM slotmode image to use for guessing the knots
+        channel: int, {0-3}
+            amplifier channel number (0-3)
+        δσ:
+            Malhanobis distance cutoff
+        n_knots: tuple
+            number of knots in each dimension. Only allow {1, 2} knots in
+            each dimension
+        edges: bool
+            include end points as knots
+        offsets: tuple of int
+            y,x values to add to the guessed knot positions to get final result.
+            Somewhat of a hack.
+        plot: bool or callable
+            if bool:
+                Whether or not to make plots of the guessed knot positions
+            if callable:
+                The function used to display the plots in the interactive
+                console
+
+        Returns
+        -------
+
+        """
+        channel = _check_channel(channel)
+        assert len(n_knots) == 2
+
+        if plot:
+            import matplotlib.pyplot as plt
+            from collections import Callable
+
+            if isinstance(plot, Callable):
+                display = plot
+                plot = True
+            else:
+                def display(*_):
+                    pass
+
+            #
+            figsize = (12, 6)
+            fig_x, axes_x = plt.subplots(2, 1, figsize=figsize)
+            fig_y, axes_y = plt.subplots(2, 1, figsize=figsize)
+
+        #
+        logger.info('Guessing knot positions for image background spline '
+                    'model via `guess_knots_gradient_threshold`')
+
+        yx_knots = []
+        # xo, yo = offsets  # offsets (found empirically)
+        for i in range(2):
+            #
+            oi = int(not bool(i))
+            knots, (m, dm, mm, s, w) = guess_knots_gradient_threshold(
+                    image, channel, i, n_knots[oi], δσ, edges)
+            yx_knots.append(knots)
+
+            if plot:
+                xy = 'xy'[oi]
+                axes = [axes_x, axes_y][i]
+
+                # plot median cross section
+                ax = axes[0]
+                ax.plot(m, marker='o', ms=3)
+                ax.axhline(np.ma.median(m), color='darkgreen')
+                for knot in knots:
+                    ax.axvline(knot, color='chocolate')
+                # ax.set_xlabel(xy)
+                ax.xaxis.set_ticklabels([])
+                ax.set_title('Image median cross section')
+                ax.set_ylabel('Counts (e⁻)')
+                ax.grid()
+
+                # plot gradient & threshold + flagged points
+                ax = axes[1]
+                ax.plot(dm, marker='o', ms=3)
+                ax.axhline(mm, color='darkgreen')
+                ax.axhspan(*(mm + np.multiply((-1, 1), (δσ * s))), color='g',
+                           alpha=0.3)
+                ax.plot(w, dm[w], 'o', color='maroon', mfc='none')
+                ax.set_title('Cross section median gradient (threshold)')
+                ax.set_xlabel(xy)
+                ax.set_ylabel(r'$\displaystyle\frac{\Delta f}{\Delta %s}$' % xy,
+                              usetex=True, rotation='horizontal',
+                              va='center', ha='right')
+                ax.grid()
+                # TODO legend
+
+        if plot:
+            display(fig_x)
+            display(fig_y)
+        return tuple(yx_knots)  # todo OR yxTuple ????????????
+
+    def init_mem(self, folder, shape, fill=np.nan, clobber=False):
+        from obstools.modelling.utils import load_memmap
+        params = self._init_mem(folder / 'bg.par',
+                                shape, fill, clobber)
+
+        dtype = [(yx, int, k) for yx, k in zip('yx', self.n_knots)]
+        knots = load_memmap(folder / 'knots.dat',
+                            shape, dtype,
+                            0,
+                            clobber=clobber)
+        return params, knots
+
+
 
 def guess_knots_gradient_threshold(image, channel, axis, n_knots, δσ=3,
                                    edges=True):
