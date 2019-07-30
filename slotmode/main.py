@@ -633,7 +633,7 @@ if __name__ == '__main__':
     # data_path.with_suffix(f'.ch{ch}.{suffix}')  #
     paths.timestamps = paths.input.with_suffix('.time')
 
-    #
+    # FIXME: npy extensions for npy format files not dat
     paths.detection = resultsPath / 'detection'
     paths.sample = paths.detection / 'sample'
     paths.sample_offsets = paths.sample / 'xy_offsets.dat'
@@ -913,6 +913,7 @@ if __name__ == '__main__':
             models = splineBG, ftb = load_pickle(paths.models)
             start = load_pickle(paths.start_idx)  # TODO: eliminate
             #xy_offsets = np.load(paths.sample_offsets)
+            # xy_offsets = np.ma.MaskedArray(xy_offsets, np.isnan(xy_offsets))
             # need also to set a few variables
             n_bright = len(tracker.groups.bright)
 
@@ -966,8 +967,7 @@ if __name__ == '__main__':
                                             **DETECT_KWS)
 
             # save xy_offsets for quick-start on re-run
-            np.save(paths.sample_offsets, xy_offsets)
-
+            np.save(paths.sample_offsets, np.ma.filled(xy_offsets))
 
             n_bright = len(tracker.groups.bright)
             # n_track = tracker.nlabels
@@ -979,10 +979,10 @@ if __name__ == '__main__':
             # create masks
             tracker.masks.prepare()  # FIXME: do you even need this???
 
-            # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             # TODO: show bad pixels ??
 
-            # 🎨🖌-------------------------------------------------------------------
+            # -------------------------------------------------------------------
             # init background model todo:  method from_cube here ??
             logger.info(f'Combining {n_detect} sample images for background '
                         f'model initialization.')
@@ -994,7 +994,7 @@ if __name__ == '__main__':
             # TODO: separate Process for the plotting
             if args.plot:
                 display(mean_image,
-                        (f"Shift-combined image {t_exp * NCOMB * n_detect} s"
+                        (f"Shift-combined image ({t_exp * NCOMB * n_detect} s"
                          f" exposure)"))
 
             # ------------------------------------------------------------------
