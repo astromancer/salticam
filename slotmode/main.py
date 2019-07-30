@@ -633,14 +633,20 @@ if __name__ == '__main__':
     # data_path.with_suffix(f'.ch{ch}.{suffix}')  #
     paths.timestamps = paths.input.with_suffix('.time')
 
-    paths.modelling = modellingPath = resultsPath / 'modelling'
-    paths.models = paths.modelling / 'models.pkl'
-    paths.tracking = resultsPath / 'tracking'
-    paths.tracker = paths.tracking / 'tracker.pkl'
+    #
     paths.detection = resultsPath / 'detection'
     paths.sample = paths.detection / 'sample'
+    paths.sample_offsets = paths.sample / 'xy_offsets.dat'
+    paths.start_idx = paths.sample / 'start_idx.dat'  # todo: eliminate
+    paths.segmentation = paths.detection / 'segmentationImage.dat'
+
     paths.modelling0 = paths.detection / 'modelling'
-    paths.start_idx = paths.modelling0 / 'start_idx.dat'  # todo: eliminate
+    paths.modelling = resultsPath / 'modelling'
+    paths.models = paths.modelling / 'models.pkl'
+
+
+    paths.tracking = resultsPath / 'tracking'
+    paths.tracker = paths.tracking / 'tracker.pkl'
 
     paths.calib = resultsPath / 'calib'
     paths.flat = paths.calib / 'flat.npz'
@@ -788,9 +794,6 @@ if __name__ == '__main__':
 
     # calib = (None, None)
 
-    # TODO: save this somewhere so it's quicker to resume
-    # TODO: same for all classes here
-
     # estimate maximal positional shift of stars by running detection loop on
     # maximal image of 1000 frames evenly distributed across the cube
     # mxshift, maxImage, segImx = check_image_drift(cube, 1000, bad_pixel_mask,
@@ -907,7 +910,8 @@ if __name__ == '__main__':
 
             tracker = load_pickle(paths.tracker)
             models = model, ftb = load_pickle(paths.models)
-            start = load_pickle(paths.start_idx)
+            start = np.load(paths.start_idx)  # TODO: eliminate
+            xy_offsets = np.load(paths.sample_offsets)
             # need also to set a few variables
             n_bright = len(tracker.groups.bright)
 
@@ -960,6 +964,10 @@ if __name__ == '__main__':
                                             plot=idisplay,
                                             **DETECT_KWS)
 
+            # save xy_offsets for quick-start on re-run
+            np.save(paths.sample_offsets, xy_offsets)
+
+
             n_bright = len(tracker.groups.bright)
             # n_track = tracker.nlabels
 
@@ -1001,10 +1009,10 @@ if __name__ == '__main__':
             # shifts between frames are significant.
 
             splineBG, _ = SlotModeBackground_V2.from_image(mean_image_masked,
-                                                        args.channel,
-                                                        SPLINE_ORDERS,
-                                                        detection=None,
-                                                        plot=idisplay)
+                                                           args.channel,
+                                                           SPLINE_ORDERS,
+                                                           detection=None,
+                                                           plot=idisplay)
             s = textwrap.dedent(f"""
             Background model:  degrees of freedom = {splineBG.dof}
             {splineBG!s}""")
@@ -1098,7 +1106,6 @@ if __name__ == '__main__':
             pool.close()
             pool.join()
 
-
             while True:
                 t0 = time.time()
                 count = next(counter)
@@ -1190,7 +1197,10 @@ if __name__ == '__main__':
             # save the tracker & models for quick startup
             save_pickle(paths.tracker, tracker)
             save_pickle(paths.models, models)
-            save_pickle(paths.start_idx, start)  # todo: eliminate
+            np.save(paths.start_idx, start)  # todo: eliminate
+            # save global segmentation as array
+            np.save(paths.segmentation, seg_deep.data)
+
 
             # ֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍
             # # plot results of sample fits
