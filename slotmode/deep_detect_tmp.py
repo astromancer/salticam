@@ -33,25 +33,10 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     for inf, grp in zip(info_, groups_):
         groups[str(inf)].extend(grp)
 
-    return seg_deep, mean_residuals
+    # return seg_deep, mean_residuals
 
     # relabel bright stars
-    try:
-        counts = seg_deep.count_sort(mean_residuals)
-    except Exception as err:
-        from IPython import embed
-        import traceback
-        import textwrap
-        embed(header=textwrap.dedent(
-            """\
-            Caught the following %s:
-            ------ Traceback ------
-            %s
-            -----------------------
-            Exception will be re-raised upon exiting this embedded interpreter.
-            """) % (err.__class__.__name__, traceback.format_exc()))
-        raise
-
+    counts = seg_deep.count_sort(mean_residuals)
     bright = np.where(counts > PHOTON_BLEED_THRESH)[0]
 
     ng = 2
@@ -61,24 +46,39 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     cxx = seg_deep.com(mean_residuals, labels_bright)
 
     if report:
-        from motley.table import Table
-        from recipes.pprint import numeric_array
+        try:
+            from motley.table import Table
+            from recipes.pprint import numeric_array
 
-        gn = []
-        for i, k in enumerate(map(len, g)):
-            gn.extend([i] * k)
+            gn = []
+            for i, k in enumerate(map(len, g)):
+                gn.extend([i] * k)
 
-        cc = numeric_array(counts[:last], precision=1, significant=3,
-                           switch=4).astype('O')
-        cc[bright] = list(map(motley.yellow, cc[bright]))
-        tbl = Table(np.column_stack([labels_bright, gn, cxx, cc]),
-                    title=(f'{last} brightest objects'
-                           '\nmean residual image'),
-                    col_headers=['label', 'group', 'y', 'x', 'counts'],
-                    minimalist=True, align=list('<<>>>'))
+            cc = numeric_array(counts[:last], precision=1, significant=3,
+                               switch=4).astype('O')
+            cc[bright] = list(map(motley.yellow, cc[bright]))
+            tbl = Table(np.column_stack([labels_bright, gn, cxx, cc]),
+                        title=(f'{last} brightest objects'
+                               '\nmean residual image'),
+                        col_headers=['label', 'group', 'y', 'x', 'counts'],
+                        minimalist=True, align=list('<<>>>'))
 
-        logger = logging.getLogger('root')
-        logger.info('\n' + str(tbl))
+            logger = logging.getLogger('root')
+            logger.info('\n' + str(tbl))
+        except Exception as err:
+            from IPython import embed
+            import traceback
+            import textwrap
+            embed(header=textwrap.dedent(
+                """\
+                Caught the following %s:
+                ------ Traceback ------
+                %s
+                -----------------------
+                Exception will be re-raised upon exiting this embedded interpreter.
+                """) % (err.__class__.__name__, traceback.format_exc()))
+            raise
+
 
     # return seg_deep, mean_residuals
 
