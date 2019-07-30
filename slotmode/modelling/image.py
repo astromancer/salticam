@@ -9,7 +9,7 @@ import more_itertools as mit
 from scipy import ndimage
 
 # local libs
-from salticam.slotmode import get_binning
+from salticam.slotmode import get_binning, _check_channel
 from recipes.introspection.utils import get_module_name
 from obstools.stats import mad
 from obstools.modelling.core import Model
@@ -20,10 +20,11 @@ from obstools.phot.segmentation import SegmentationHelper, \
 from obstools.modelling.core import UnconvergedOptimization
 
 # relative libs
-from ..spline2d import Spline2D
+from .spline2d import Spline2D
 
-FTB_COUNT_THRESH = 15
-FTB_WIDTH = 10
+PHOTON_BLEED_THRESH = 3e4
+PHOTON_BLEED_WIDTH = 10
+# TODO YOU CAN PROBABLY FIT THESE PARAMETERS WITH A GOOD MODEL
 
 # module level logger
 logger = logging.getLogger(get_module_name(__file__))
@@ -198,7 +199,7 @@ class MedianEstimator(Model):
 
 class FrameTransferBleed(SegmentedImageModel):
     @classmethod
-    def from_image(cls, image, seg, flux_threshold=20, width=FTB_WIDTH,
+    def from_image(cls, image, seg, flux_threshold=20, width=PHOTON_BLEED_WIDTH,
                    labels=None,
                    label_insert=None):
         """
@@ -239,7 +240,8 @@ class FrameTransferBleed(SegmentedImageModel):
         return obj, seg, bright
 
     @classmethod
-    def from_segments(cls, seg, labels=None, loc=None, width=FTB_WIDTH):
+    def from_segments(cls, seg, labels=None, loc=None,
+                      width=PHOTON_BLEED_WIDTH):
         #
         if loc is None:
             loc = seg.com(labels)
@@ -248,7 +250,7 @@ class FrameTransferBleed(SegmentedImageModel):
         return cls(seg, loc)
 
     @staticmethod
-    def adapt_segments(seg, labels=None, loc=None, width=FTB_WIDTH,
+    def adapt_segments(seg, labels=None, loc=None, width=PHOTON_BLEED_WIDTH,
                        label_insert=None, copy=False):
         """
 
@@ -294,7 +296,7 @@ class FrameTransferBleed(SegmentedImageModel):
         else:
             return seg.add_segments(new, label_insert)
 
-    def __init__(self, segm, labels, adapt=False):
+    def __init__(self, segm, labels, adapt=False, width=PHOTON_BLEED_WIDTH):
 
         invalid = np.setdiff1d(labels, segm.labels)
         if len(invalid):
@@ -307,7 +309,7 @@ class FrameTransferBleed(SegmentedImageModel):
         SegmentedImageModel.__init__(self, segm)
 
         me = MedianEstimator()
-        me.dof = FTB_WIDTH
+        me.dof = int(width)
         self.add_model(me, labels)
 
     def residuals(self, p, data, xy_offset):
@@ -319,7 +321,8 @@ class FrameTransferBleed(SegmentedImageModel):
             data[..., xs] -= m
         return data
 
-    def set_segments(self, segm, adapt=False, labels=None, width=FTB_WIDTH):
+    def set_segments(self, segm, adapt=False, labels=None,
+                     width=PHOTON_BLEED_WIDTH):
         if not isinstance(segm, SegmentationGridHelper):
             segm = SegmentationGridHelper(segm)
 
@@ -464,7 +467,66 @@ def spline_order_search1(cls, image, channel, report=None, **kws):
     return model, p_best
 
 
-class SlotModeBackground(Spline2D):  # Maybe SlotModeImageModel  ??
+from .spline2d import Spline2DImage
+
+
+class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
+
+    def __init__(self, orders, knots, smooth=True, continuous=True,
+                 primary=None):
+        Spline2DImage.__init__(self, orders, knots, smooth, continuous, primary)
+        SegmentedImageModel.__init__(self, self.get_segmented_image(),
+                                     list(self.models))
+
+
+def guess_knots_gradient_threshold(image, channel, axis, n_knots, δσ=3,
+                                   edges=True):
+    # median cross section
+
+    m = np.ma.median(image, int(not bool(axis)))
+
+    # detect knot positions by gradient threshold
+    dm = np.diff(m)
+    mm = np.ma.median(dm)
+    s = mad(dm, mm)
+    w, = np.where(np.abs(dm - mm) > δσ * s)
+
+    # array one less in size since taking point to point diff
+    grp = list(map(list, mit.consecutive_groups(w + 1)))
+    n_grp = len(grp)
+
+    knots = [0] * (n_knots + 2 * edges)
+    if edges:
+        knots[-1] = image.shape[axis]
+
+    if n_knots == 1:
+        # odd numbered channels seem to have the same background
+        # structure
+        if channel in (1, 3):
+            # first item from last consecutive group
+            *_, (k0, *_) = grp
+            knots[edges] = k0  # - xo
+
+        else:
+            # last item from first consecutive group
+            (*_, k0), *_ = grp
+            knots[edges] = k0  # + xo
+
+    elif n_knots == 2:
+        if n_grp < 2:
+            raise ValueError('Could only find 1 knot')
+
+        # last item from first consecutive group and first item from
+        # last consecutive group
+        (*_, k0), *_, (k1, *_) = grp
+        knots[edges:-1 if edges else None] = (k0, k1 - 2)  # (k0 + yo, k1 - 2)
+    else:
+        raise NotImplementedError
+
+    return knots, (m, dm, mm, s, w)
+
+
+class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
     """
     Image model for SALTICAM slot-mode background.
     """
@@ -541,7 +603,8 @@ class SlotModeBackground(Spline2D):  # Maybe SlotModeImageModel  ??
         return best_models[reorder], best_results[reorder], best_gof[reorder]
 
     @classmethod
-    def from_image(cls, image, channel, orders, detection=None, **detect_opts):
+    def from_image(cls, image, channel, orders, detection=None,
+                   plot=False, **detect_opts):
         #
         """
         Construct a Spline2D instance from an image and polynomial
@@ -563,8 +626,7 @@ class SlotModeBackground(Spline2D):  # Maybe SlotModeImageModel  ??
         """
 
         #
-
-        knots = cls.guess_knots(image, channel)
+        knots = cls.guess_knots(image, channel, plot=plot)
         mdl = cls(orders, knots)
         # mdl.groups['spline2d'] = mdl.segm.labels
 
@@ -581,68 +643,103 @@ class SlotModeBackground(Spline2D):  # Maybe SlotModeImageModel  ??
         return mdl, seg
 
     @staticmethod
-    def guess_knots(image, channel, δσ=3, n_knots=(1, 2), edges=True):
+    def guess_knots(image, channel, δσ=3, n_knots=(1, 2), edges=True,
+                    offsets=(0, 0), plot=False):
         """
-        A fast estimate of spline knot positions from a SALTICAM image
+        A fast estimate of spline knot positions from a SALTICAM image by
+        sigma-thresholding the point to point gradient of the cross sectional
+        image median.
 
         Parameters
         ----------
         image:  array
-            slotmode image to use for guessing the knots
-        channel: int
+            SALTICAM slotmode image to use for guessing the knots
+        channel: int, {0-3}
             amplifier channel number (0-3)
-        δσ
-        n_knots
-        edges
+        δσ:
+            Malhanobis distance cutoff
+        n_knots: tuple
+            number of knots in each dimension. Only allow {1, 2} knots in
+            each dimension
+        edges: bool
+            include end points as knots
+        offsets: tuple of int
+            y,x values to add to the guessed knot positions to get final result.
+            Somewhat of a hack.
+        plot: bool or callable
+            if bool:
+                Whether or not to make plots of the guessed knot positions
+            if callable:
+                The function used to display the plots in the interactive
+                console
 
         Returns
         -------
 
         """
-        assert 0 <= channel <= 3, 'Invalid amplifier channel %i' % channel
+        channel = _check_channel(channel)
         assert len(n_knots) == 2
 
-        ishape = image.shape[::-1]
-        yx_knots = []  # todo OR yxTuple ????????????
-        xo, yo = (3, 3)  # offsets (found empirically)
-        for i in range(2)[::-1]:
-            # median cross section
-            m = np.ma.median(image, i)
-            mm = np.ma.median(m)
-            s = mad(m, mm)
-            w = np.where(np.abs(m - mm) > δσ * s)[0]
-            grp = list(map(list, mit.consecutive_groups(w)))
+        if plot:
+            import matplotlib.pyplot as plt
+            from collections import Callable
 
-            nk = n_knots[i]
-            knots = [0] * (nk + 2 * edges)
-            if edges:
-                knots[-1] = ishape[i]
-
-            if nk == 1:
-                # odd numbered channels seem to have the same background
-                # structure
-                if channel in (1, 3):
-                    # first item from last consecutive group
-                    *_, (k0, *_) = grp
-                    knots[edges] = k0 - xo
-
-                else:
-                    # last item from first consecutive group
-                    (*_, k0), *_ = grp
-                    knots[edges] = k0 + xo
-
-            elif nk == 2:
-                # last item from first consecutive group and first item from
-                # last consecutive group
-                (*_, k0), *_, (k1, *_) = grp
-                knots[edges:-1 if edges else None] = (k0 + yo, k1 - 2)
+            if isinstance(plot, Callable):
+                display = plot
+                plot = True
             else:
-                raise NotImplementedError
+                def display(*_):
+                    pass
 
             #
+            figsize = (12, 6)
+            fig_x, axes_x = plt.subplots(2, 1, figsize=figsize)
+            fig_y, axes_y = plt.subplots(2, 1, figsize=figsize)
+
+        yx_knots = []
+        # xo, yo = offsets  # offsets (found empirically)
+        for i in range(2):
+            #
+            oi = int(not bool(i))
+            knots, (m, dm, mm, s, w) = guess_knots_gradient_threshold(
+                    image, channel, i, n_knots[oi], δσ, edges)
             yx_knots.append(knots)
 
-        return tuple(yx_knots)
+            if plot:
+                xy = 'xy'[oi]
+                axes = [axes_x, axes_y][i]
+
+                # plot median cross section
+                ax = axes[0]
+                ax.plot(m, marker='o', ms=3)
+                ax.axhline(np.ma.median(m), color='darkgreen')
+                for knot in knots:
+                    ax.axvline(knot, color='chocolate')
+                # ax.set_xlabel(xy)
+                ax.xaxis.set_ticklabels([])
+                ax.set_title('Image median cross section')
+                ax.set_ylabel('Counts (e⁻)')
+                ax.grid()
+
+                # plot gradient & threshold + flagged points
+                ax = axes[1]
+                ax.plot(dm, marker='o', ms=3)
+                ax.axhline(mm, color='darkgreen')
+                ax.axhspan(*(mm + np.multiply((-1, 1), (δσ * s))), color='g',
+                           alpha=0.3)
+                ax.plot(w, dm[w], 'o', color='maroon', mfc='none')
+                ax.set_title('Cross section median gradient')
+                ax.set_xlabel(xy)
+                ax.set_ylabel(r'$\displaystyle\frac{\Delta f}{\Delta %s}$' % xy,
+                              usetex=True, rotation='horizontal',
+                              va='center', ha='right')
+                ax.grid()
+                # TODO legend
+
+        if plot:
+            display(fig_x)
+            display(fig_y)
+        return tuple(yx_knots)  # todo OR yxTuple ????????????
 
     def init_mem(self, folder, shape, fill=np.nan, clobber=False):
         from obstools.modelling.utils import load_memmap
@@ -651,14 +748,14 @@ class SlotModeBackground(Spline2D):  # Maybe SlotModeImageModel  ??
 
         dtype = [(yx, int, k) for yx, k in zip('yx', self.n_knots)]
         knots = load_memmap(folder / 'knots.dat',
-                                shape, dtype,
-                                0,
-                                clobber=clobber)
+                            shape, dtype,
+                            0,
+                            clobber=clobber)
         return params, knots
 
     def detect(self, image, mask=False, background=None, snr=3., npixels=7,
                edge_cutoff=None, deblend=False, dilate=0,
-               flux_thresh_ft_bleed=FTB_COUNT_THRESH):
+               flux_thresh_ft_bleed=PHOTON_BLEED_THRESH):
         """
         Run detection, add labels, add group
 

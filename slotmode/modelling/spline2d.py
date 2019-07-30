@@ -13,11 +13,18 @@ import more_itertools as mit
 
 # local libs
 from recipes.dict import AttrDict
-from salticam.slotmode.ppoly import PPoly2D
+from .ppoly import PPoly2D, PPoly2D_v2
 from obstools.modelling.parameters import Parameters
 from obstools.modelling.image import SegmentedImageModel
 from obstools.modelling.core import UnconvergedOptimization, nd_sampler
 from recipes import pprint
+
+from .ppoly import _check_orders_knots
+
+SEMANTIC_IDX2POS = {(1, 0): 'top',
+                    (-1, 0): 'bottom',
+                    (0, 1): 'right',
+                    (0, -1): 'left'}
 
 # simple container for 2-component objects
 yxTuple = namedtuple('yxTuple', ['y', 'x'])
@@ -25,6 +32,41 @@ yxTuple = namedtuple('yxTuple', ['y', 'x'])
 
 def _yx_str(obj):
     return f'(y={obj.y!s}, x={obj.x!s})'
+
+
+def random_walk_gen(n, n_dims=1, step_size=None, origin=None):
+    """
+    Basic random walk generator
+
+    Parameters
+    ----------
+    n
+    n_dims
+    step_size
+    origin
+
+    Returns
+    -------
+
+    """
+    n = int(n)
+    n_dims = int(n_dims)
+
+    if step_size is None:
+        step_size = 1. / np.sqrt(n_dims)
+
+    if origin is None:
+        origin = np.zeros(n_dims)
+    else:
+        origin = np.asanyarray(origin)
+        assert len(origin) == n_dims, 'Origin has incorrect dimensions'
+
+    step_set = [-1, 0, 1]
+    pos = origin
+    for i in range(n):
+        δ = np.random.choice(a=step_set, size=n_dims) * step_size
+        pos = pos + δ
+        yield pos
 
 
 # from IPython import embed
@@ -112,8 +154,7 @@ class Spline2D(SegmentedImageModel):
             poly.set_neighbours(**n)
 
     def __call__(self, p, grid=None):
-        # TODO: with an actual grid ?? OR better yet, with a resolution which
-        #  automatically makes a unitary grid
+        # TODO: with an actual grid ??
 
         if isinstance(p, np.void):
             p = Parameters(p)
@@ -140,9 +181,25 @@ class Spline2D(SegmentedImageModel):
         return out
 
     def __str__(self):
-        return f'{self.__class__.__name__}' \
-            f'(orders={_yx_str(self.orders)}, ' \
-            f'knots={_yx_str(self.knots)})'
+        # multi-line string repr
+        name = self.__class__.__name__
+        ws = ' ' * len(name)
+        args = 'orders', 'knots'
+        w0 = max(map(len, args))
+        oy, ox = map(str, self.orders)
+        ky, kx = map(str, self.knots)
+        wy = max(map(len, (oy, ky)))
+        wx = max(map(len, (ox, kx)))
+        s = ''
+        for i, (pre, arg, y, x) in enumerate(
+                zip((name, ws), args, *zip(self.orders, self.knots))):
+            s += f'{pre}({arg:<{w0}}=(y={y!s:<{wy}}, x={x!s:<{wx}})'
+            s += ',\n' * int(not i)
+        return s
+        # return f'{name}({args[0]:<{w0}}=(y={oy!s:<{wy}}, x={ox!s:<{wx}}),\n' \
+        #        f'{ws} {args[1]:<{w0}}=(y={ky!s:<{wy}}, x={kx!s:<{wx}}))'
+        # return f'{name}(orders={_yx_str(self.orders)},\n' \
+        #        f'{ws} knots={_yx_str(self.knots)})'
 
     # def fit(self, data, stddev=None, **kws):
     #     # median rescale
@@ -152,7 +209,8 @@ class Spline2D(SegmentedImageModel):
     #     return results
 
     def _check_params(self, p):
-        if isinstance(p, Parameters):
+        if p.__class__.__name__ == 'Parameters':  # HACK auto-reload
+            # isinstance(p, Parameters):
             npar = p.npar
         else:
             npar = len(p)
@@ -176,7 +234,7 @@ class Spline2D(SegmentedImageModel):
                 p[poly.name] = poly.coeff[poly.free]
         else:
             p = np.zeros(self.dof)
-            splix = np.zeros(self.nmodels + 1, int)
+            splix = np.zeros(len(self.models) + 1, int)
             splix[1:] = np.cumsum(self.models.dofs)
             slices = itt.starmap(slice, mit.pairwise(splix))
             for poly, sl in zip(self.models.values(), slices):
@@ -270,7 +328,10 @@ class Spline2D(SegmentedImageModel):
 
         k_start = knots[io][j]
         k_vals = k_start + np.arange(*range_)
-        k_vals = k_vals[(0 < k_vals) | (k_vals < data.shape[io])]
+        k_vals = k_vals[(0 < k_vals) & (k_vals < data.shape[io])]
+        if len(k_vals) == 0:
+            raise ValueError('Knot optimization failed due to knots being '
+                             'outside of image. Whoops!')
 
         χ2r = np.ma.empty(np.ptp(range_))
         χ2r.mask = True
@@ -286,6 +347,9 @@ class Spline2D(SegmentedImageModel):
                 # self.logger.exception('UnconvergedOptimization in '
                 #                       '`_optimize_knots` for labels %s',
                 #                       labels)
+            # except Exception:
+            #     from IPython import embed
+            #     embed()
             else:
                 χ2r[l] = self.redchi(r, data)
                 results[k] = r
@@ -520,7 +584,8 @@ class Spline2D(SegmentedImageModel):
         ----------
         knots: 2-tuple
             y, x positions of knots
-
+        preserve_labels: bool
+            preserve any other segments "on top of" background
         Returns
         -------
 
@@ -537,8 +602,8 @@ class Spline2D(SegmentedImageModel):
         if preserve_labels:
             # preserve any other segments "on top of" background
             current = self.segm.labels
-            keep = current[current > self.nmodels]
-            seg_obj = self.segm.select(keep)
+            keep = current[current > len(self.models)]
+            seg_obj = self.segm.keep(keep)
             mask = (seg_obj != 0)
             seg[mask] = seg_obj[mask]
 
@@ -586,3 +651,388 @@ class Spline2D(SegmentedImageModel):
                 ax.set(xlim=(-0.5, ishape[1] - 0.5),
                        ylim=(-0.5, ishape[0] - 0.5))
         return fig
+
+
+# def AttrGetter():
+#     def attr_getter(self, *attrs):
+#         """Fetch attributes from polys return as object array"""
+#         return operator.attrgetter(*attrs)(self)
+
+
+# TODO: ListOf constructor. check consistent type. optional expose
+#  certain attributes to vectorized getter
+
+
+def column_vector(v):
+    v = np.asarray(v)
+    if v.ndim == 1:
+        v = v[None].T
+    return v
+
+
+class ScaledTranslation(object):
+    def __init__(self, o, s):
+        self.o = column_vector(o)
+        self.s = column_vector(s)
+
+    def __str__(self):  # TODO
+        return f'{self.__class__.__name__}\ns={self.s!s}\no={self.o!s}'
+
+    def __call__(self, yx):
+        return yx * self.s + self.o
+
+    def inverse(self, yx):
+        return (yx - self.o) / self.s
+
+
+from obstools.modelling.core import CompoundModel, StaticGridMixin
+
+
+class Spline2D_v2(CompoundModel):
+    """Non-uniform 2d polynomial spline for image / surface modelling"""
+
+    poly_name_base = 'p'
+
+    def __init__(self, orders, knots, smooth=True, continuous=True,
+                 primary=None):
+
+        # TODO smoothness / continuity at each knot ?
+
+        # checks
+        assert len(orders) == len(knots) == 2
+        checker = itt.starmap(_check_orders_knots, zip(orders, knots))
+
+        # wrap namedtuple for easy attribute access
+        self.orders, self.knots = itt.starmap(yxTuple, zip(*checker))
+        self.n_polys = n_polys = tuple(map(len, self.orders))
+        self.n_knots = np.subtract(n_polys, 1)
+        self._ix = np.indices(self.n_polys)  # index grid for polys
+
+        # get polynomial sequence order (iteration starts from primary poly)
+        if primary is None:
+            # The segment with the largest area will be the primary one
+            sizes = list(itt.product(*map(np.diff, self.knots)))
+            sizes = np.reshape(sizes, self.n_polys + (2,))
+            primary = divmod(sizes.prod(-1).argmax(), self.n_polys[1])
+        else:
+            if len(primary) == len(knots):
+                raise ValueError('Index of `primary` should have same number of'
+                                 'dimensions as `knots`: %i' % self.n_knots)
+        self.primary = np.asarray(primary)
+        self._itr_order = self.get_iter_order()
+        domains = self.get_domains()
+        # domain transform params
+        origins, scale = self.get_domain_transform_params()
+
+
+        # create polynomials
+        polys = np.empty(self.n_polys, 'O')
+        for i, j in self._ix.reshape((2, -1)).T:
+            # create 2d polynomial
+            o = self.multi_order(i, j)  # multi-order 2-tuple
+            poly = polys[i, j] = PPoly2D_v2(o, smooth, continuous)
+            # ensure unique names
+            poly.name = f'{self.poly_name_base}{i}{j}'  # p₀₁ ?
+            poly.domain = domains[i, j]
+            poly.domain_transform = ScaledTranslation(origins[i, j], scale)
+            # poly.origin = origins[i, j, None].T
+            # poly.scale = scale[None].T
+
+        # get dependent polys
+        used = np.zeros(self.n_polys, bool)
+        # self.dependant = {}
+        for ij in zip(*self._itr_order):
+            b = self._get_neighbours_bool(*ij)
+            unused_neigh = b & ~used
+            children = list(polys[unused_neigh])
+            # positions of neighbours relative to current
+            neigh_pos = np.subtract(np.where(unused_neigh), np.atleast_2d(ij).T)
+            named_pos = map(SEMANTIC_IDX2POS.get, map(tuple, neigh_pos.T))
+            polys[ij].set_neighbours(**dict(zip(named_pos, children)))
+
+            # self.dependant[ij] = list(self.polys[b & ~used])
+
+            used |= b
+            used[ij] = True
+            if used.all():
+                break
+
+        # init parent
+        CompoundModel.__init__(self, polys[self._itr_order])
+
+    def __str__(self):
+        # multi-line string repr
+        name = self.__class__.__name__
+        ws = ' ' * len(name)
+        args = 'orders', 'knots'
+        w0 = max(map(len, args))
+        oy, ox = map(str, self.orders)
+        ky, kx = map(str, self.knots)
+        wy = max(map(len, (oy, ky)))
+        wx = max(map(len, (ox, kx)))
+        s = ''
+        for i, (pre, arg, y, x) in enumerate(
+                zip((name, ws), args, *zip(self.orders, self.knots))):
+            s += f'{pre}({arg:<{w0}}=(y={y!s:<{wy}}, x={x!s:<{wx}})'
+            s += ',\n' * int(not i)
+        return s
+
+    def __call__(self, p, grid):
+
+        # dof consistency check etc
+        p = self._check_params(p)
+
+        # initialize output array
+        out = np.zeros(np.shape(grid)[1:])
+
+        # compute and fill in regions for each poly
+        self.eval(p, grid, out)
+        return out
+
+    def eval(self, p, grid, out):
+        # compute and fill in regions for each poly
+        for mdl, pp in zip(self.models, self.split_params(p)):
+            if np.isnan(pp).any():
+                continue  # nans are ignored. perhaps warn ??
+
+            # fill the modelled segment in the output array
+            mdl(pp, grid, out)
+
+    def _check_params(self, p):
+        #
+        # interpret parameters
+        p = np.asanyarray(p)
+
+        # convert rec array to Parameters
+        if isinstance(p, np.void):
+            p = Parameters(p)
+
+        if p.ndim not in (0, 1):
+            raise ValueError('Parameter vector has invalid dimensionality of '
+                             '%i' % p.ndim)
+
+        # if p.__class__.__name__ == 'Parameters':  # HACK auto-reload
+        if isinstance(p, Parameters):
+            n_par = p.npar
+        else:
+            n_par = len(p)
+
+        if n_par != self.dof:
+            raise ValueError('Parameter vector size (%i) does not match '
+                             'degrees of freedom (%i) for model %r' %
+                             (n_par, self.dof, self))
+        return p
+
+    def update_coeff(self, plist):
+        # update tied coefficients for `poly` using current variable
+        # coefficient values in `poly.coeff`. walk neighbours and do the same
+        for poly, p in zip(self.models, plist):
+            poly.set_coeff(p)
+
+    def multi_order(self, i, j):
+        return self.orders.y[i], self.orders.x[j]  # 2d multi-order
+
+    def _get_neighbours_dist(self, i, j):
+        # taxicab/rectilinear/L1/city block/Manhattan distance to neighbours
+        return np.abs(self._ix - np.array((i, j), ndmin=3).T).sum(0)
+
+    def _get_neighbours_bool(self, i, j):
+        return self._get_neighbours_dist(i, j) == 1
+
+    def get_iter_order(self):
+        d = self._get_neighbours_dist(*self.primary)
+        return np.divmod(d.ravel().argsort(), len(d))
+
+    def get_grid_order(self):
+        gp = np.zeros(self.n_polys, int)
+        gp[self._itr_order] = np.arange(np.product(self.n_polys))
+        return gp
+
+    def get_domains(self):
+        # the yx domains (lower upper) as implied by the knots
+        domains = itt.product(*map(mit.pairwise, self.knots))
+        return np.reshape(list(domains), self.n_polys + (2, 2))
+
+    def get_slices(self):
+        """
+        Get an array of `slice` objects for the current knots
+
+        Returns
+        -------
+
+        """
+        domains = self.get_domains()
+        return np.vectorize(slice)(*domains.round().astype(int).T).T
+
+    def split_params(self, p):
+        """
+        Split parameter vector into `n` parts, where `n` is the number of
+        polynomials in the model, and each part has size `m` corresponding to
+        the number of free coefficients in the component polynomials.
+
+        Parameters
+        ----------
+        p
+
+        Returns
+        -------
+
+        """
+        if isinstance(p, Parameters):
+            return p.tolist()
+
+        return np.split(p, np.cumsum(self.dofs))
+
+    def get_domain_transform_params(self):
+        # get domain ranges for polys
+        # For the spline to work with boundary constraints, we need each
+        # polynomial to live in it's own independent domain intrinsically.
+        # It is otherwise mathematically impossible to have the unique
+        # coefficients for neighbouring polynomials in the same domain.
+        # The domains are chosen in such a way that the yx value for
+        # domain of neighbouring polynomials on the boundary
+        # with the primary is always 0.
+
+        # Additionally we need to ensure the domains to have the same physical
+        # scale.  This is needed to have the smoothness condition be
+        # physically meaningful in the image space.  Here we simply scale by
+        # the image dimensions as (implied by the knots).  This means that
+        # the internal domain of each polynomial will always be a sub-interval
+        # of [0, 1].  This aids numerical stability when fitting since powers
+        # of numbers greater than 1 tend to explode.
+
+        dom = self.get_domains()
+        less = np.moveaxis(self._ix < np.array(self.primary, ndmin=3).T, 0, -1)
+        # invert the domains for polys that are below or left of primary
+        dom[less] = dom[less][:, ::-1]
+        # zeros points for each poly in global (image) coordinates
+        origins = dom[..., 0]
+        scale = dom[-1, -1, :, 1]  # *  inv
+
+        # return params as though for inverse transform
+        return -origins / scale, 1. / scale
+
+    # --------------------------------------------------------------------------
+    # Parameter space restrictions
+
+    def maximal_degree(self, n):
+        # restrict polynomials to have degree smaller equal n
+        models = self.models.values()
+        for poly in models:
+            poly.free[n:, n:] = False
+
+        for poly in models:
+            poly.set_freedoms()
+
+    def no_mixed_terms(self):
+        models = self.models.values()
+        for poly in models:
+            poly.free[1:, 1:] = False
+
+        for poly in models:
+            poly.set_freedoms()
+
+    def full_freedom(self):
+        models = self.models.values()
+        for i, poly in enumerate(models):
+            if self.iorder[i] == self.primary:
+                poly.free[:] = True
+            else:
+                j = poly.smooth + poly.continuous
+                poly.free[j:, j:] = True
+
+        for poly in models:
+            poly.set_freedoms()
+
+    def diagonal_freedom(self):
+        models = self.models.values()
+        for poly in models:
+            poly.free_diagonal()
+
+        for poly in models:
+            poly.set_freedoms()
+
+    # --------------------------------------------------------------------------
+
+    def display(self, p, grid, **kws):
+        from graphical.imagine import ImageDisplay
+        im = ImageDisplay(self(p, grid), **kws)
+        for hv, k in zip('hv', self.knots):
+            for kk in k[1:-1]:
+                getattr(im.ax, f'ax{hv}line')(kk, color='orange')
+        return im
+
+
+class Spline2DImage(Spline2D_v2, StaticGridMixin):
+
+    def __init__(self, orders, knots, smooth=True, continuous=True,
+                 primary=None):
+        super().__init__(orders, knots, smooth, continuous, primary)
+
+        # create grid based on extremal knots
+        grid = np.indices((self.knots.y[-1], self.knots.x[-1]))
+        for poly in self.models:
+            # set static grid and static domain mask
+            poly.set_grid(grid)
+
+    def __call__(self, p, grid=None):
+
+        # dof consistency check etc
+        p = self._check_params(p)
+
+        # initialize output array
+        if grid is None:
+            out_shape = (self.knots.y[-1], self.knots.x[-1])
+        else:
+            out_shape = np.shape(grid)[1:]
+        out = np.zeros(out_shape)
+        # if grid not passed, it will still be `None` here which gets passed
+        # through and we let component models set grids if needed
+
+        # compute and fill in regions for each poly
+        self.eval(p, grid, out)
+        return out
+
+    def get_shape(self):
+        return self.knots.y[-1], self.knots.x[-1]
+
+    def get_segmented_image(self):
+        """Create segmented image data from knots"""
+        seg = np.zeros(self.get_shape(), int)
+        slices = self.get_slices()[self._itr_order]
+        for k, s in enumerate(slices):
+            seg[tuple(s)] = k + 1
+        return seg
+
+    def display(self, p, grid=None, **kws):
+        return super().display(p, grid, **kws)
+
+    def display_residuals(self, image, result, show_knots=True,
+                          knots_line_colour='orange', seg=None):
+
+        from obstools.modelling.image.diagnostics import plot_modelled_image
+
+        fig = plot_modelled_image(self, image, result, seg)
+
+        if result is not None and show_knots:
+            shape = self.knots.y[-1], self.knots.x[-1]
+            for ax in fig.axes[2:3]:
+                ax.vlines(self.knots.x[1:], 0, shape[0], knots_line_colour)
+                ax.hlines(self.knots.y[1:], 0, shape[1], knots_line_colour)
+                ax.set(xlim=(-0.5, shape[1] - 0.5),
+                       ylim=(-0.5, shape[0] - 0.5))
+        return fig
+
+# class Poly2DHessian(HessianUpdateStrategy):
+#     def initialize(self, n, approx_type):
+#         self.h = np.empty((n, n))
+#         self.approx_type = approx_type
+#
+#     def get_matrix(self):
+#         return self.h
+#
+#     def dot(self, p):
+#         return self.h.dot(p)
+#
+#     def update(self, delta_x, delta_grad):
+#         pass

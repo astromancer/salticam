@@ -4,8 +4,8 @@ from obstools.phot.tracking import StarTracker
 from . import get_bad_pixel_mask
 from .modelling.image import FrameTransferBleed
 
-FT_BLEED_THRESH_COUNTS = 3.e4
-FT_BLEED_WIDTH = 8
+FT_BLEED_THRESH_COUNTS = 3.e4  # TODO: PHOTON_BLEED_THRESH
+FT_BLEED_WIDTH = 8             # TODO: kill ??
 
 
 class SlotModeTracker(StarTracker):
@@ -39,26 +39,26 @@ class SlotModeTracker(StarTracker):
     #     return tracker, p0bg
 
     @classmethod
-    def from_images(cls, images, mask=None, required_positional_accuracy=0.5,
-                    masked_ratio_max=0.1, merge_accept_ratio=0.2,
-                    post_merge_dilate=1, flux_sort=True,
+    def from_images(cls,  images, mask=None, required_positional_accuracy=0.5,
+                    centre_distance_max=1, f_detect_measure=0.5,
+                    f_detect_merge=0.2, post_merge_dilate=1, flux_sort=True,
                     ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
                     ft_bleed_width=FT_BLEED_WIDTH,
-                    worker_pool=None, report=None, **detect_kws):
+                    worker_pool=None, report=None, plot=False, **detect_kws
+                    ):
 
         tracker, xy, centres, xy_offsets, counts, counts_med = \
             super().from_images(images, mask, required_positional_accuracy,
-                                masked_ratio_max, merge_accept_ratio,
-                                post_merge_dilate, flux_sort,
-                                worker_pool, report, **detect_kws)
+                                centre_distance_max, f_detect_measure,
+                                f_detect_merge, post_merge_dilate, flux_sort,
+                                worker_pool, report, plot, **detect_kws)
 
         # save object mask before adding streaks
         tracker.masks['objects'] = tracker.masks.all  #
-        tracker.add_ft_regions(centres, counts, ft_bleed_threshold,
+        tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
                                ft_bleed_width)
 
         return tracker, xy, centres, xy_offsets, counts, counts_med
-
 
     @classmethod
     def from_measurements(cls, segs, xy, counts, f_accept=0.2,
@@ -67,7 +67,8 @@ class SlotModeTracker(StarTracker):
                           ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
                           ft_bleed_width=FT_BLEED_WIDTH):
 
-        tracker, xy, centres, xy_offsets, counts, counts_med = \
+        # tracker, xy, centres, xy_offsets, counts, counts_med = \
+        return \
             super().from_measurements(segs, xy, counts, f_accept,
                                       post_merge_dilate,
                                       required_positional_accuracy,
@@ -76,7 +77,7 @@ class SlotModeTracker(StarTracker):
 
         # save object mask before adding streaks
         tracker.masks['objects'] = tracker.masks.all  #
-        tracker.add_ft_regions(centres, counts, ft_bleed_threshold,
+        tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
                                ft_bleed_width)
 
         return tracker, xy, centres, xy_offsets, counts, counts_med
@@ -86,11 +87,27 @@ class SlotModeTracker(StarTracker):
         # add regions affected by frame transfer bleeding
         bright = np.where(counts > ft_bleed_threshold)[0]
 
-        # HACK for if positions not accurate enough # FIXME
-        if not len(self.use_labels):
-            self.use_labels = bright
+        # # HACK for if positions not accurate enough # FIXME
+        # if not len(self.use_labels):
+        #     self.use_labels = bright
 
-        loc = centres[bright, 1] - self.zero_point[1]
+        try:
+            loc = centres[bright, 1] - self.segm.zero_point[1]
+        except Exception as err:
+            from IPython import embed
+            import traceback
+            import textwrap
+            embed(header=textwrap.dedent(
+                """\
+                Caught the following %s:
+                ------ Traceback ------
+                %s
+                -----------------------
+                Exception will be re-raised upon exiting this embedded interpreter.
+                """) % (err.__class__.__name__, traceback.format_exc()))
+            raise
+
+
         _, labels_streaks = FrameTransferBleed.adapt_segments(
                 self.segm, loc=loc, width=ft_bleed_width)
 

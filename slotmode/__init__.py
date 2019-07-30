@@ -19,6 +19,13 @@ CHANNEL_SIZE_PIXELS = (144, 1024)  # pixels per channel
 CHANNEL_SIZE_ARCMIN = np.multiply(CHANNEL_SIZE_PIXELS, 0.00236667)  # 0.142 / 60
 
 
+def _check_channel(channel):
+    channel = int(channel)
+    if channel < 0:
+        channel += N_CHANNELS
+    assert 0 <= channel <= 3, 'Invalid amplifier channel %i' % channel
+    return channel
+
 def _check_channels(channels):
     # resolve valid amplifier channels
     channels = np.atleast_1d(channels).astype(int)

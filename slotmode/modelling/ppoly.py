@@ -1,5 +1,5 @@
 """
-Fittable piecewise polynomials (non-uniform splines) in 1D and 2D
+Fittable piecewise polynomials (a.k.a. non-uniform splines) in 1D and 2D
 """
 
 # std libs
@@ -7,7 +7,6 @@ import numbers
 import operator
 import textwrap
 import warnings
-import functools
 import functools
 import itertools as itt
 from collections import OrderedDict
@@ -27,7 +26,8 @@ from recipes.set import OrderedSet
 from recipes.array.fold import fold
 from recipes.language import unicode
 from recipes import pprint
-from obstools.modelling.core import Parameters, RescaleInternal
+from obstools.modelling.core import RescaleInternal
+from obstools.modelling.parameters import Parameters
 from obstools.modelling import StaticGridMixin, Model, CompoundModel
 
 
@@ -612,6 +612,32 @@ def get_ppoly_repr(coeff, breakpoints,
         rep += r'%s &\mbox{if } %s \leq %s < %s \\' % (eq, i0, variable, i1)
     rep += '\end{cases}'
     return rep
+
+
+# TODO:
+#  class Representation(): ??
+
+
+def repr_matrix_product(coeff):
+    c = str(coeff)
+    yo, xo = multi_order = coeff.shape
+    ypr, xpr = map(vector_powers, 'yx', multi_order, (0, 1))
+    skip_lines = (yo // 2) - int(not (yo % 2))
+    # pre_space = ' ' * (len(ypr) + 1)
+    # zip([''] + ypr.splitlines(), [''] + c.splitlines(), xpr.splitlines())
+
+    y_space = len(ypr)
+    c_space = max(map(len, c.splitlines()))
+
+    ylist = [''] * (skip_lines + 1) + [ypr]
+    clist = [''] + c.splitlines()
+    xlist = xpr.splitlines()
+    lines = []
+    for ys, cs, xs in itt.zip_longest(ylist, clist, xlist, fillvalue=''):
+        lines.append(
+                '{:{}s} {:{}s} {:s}'.format(ys, y_space, cs, c_space, xs)
+        )
+    return '\n'.join(lines)
 
 
 # TODO: move to modelling.core ?????
@@ -2138,78 +2164,72 @@ class PPoly2dOuter(StaticGridMixin, CompoundModel):  # RescaleInternal
 
 # def yield_free():
 
+# The terms "order" and "degree" are used as synonymns throughout
+# https://en.wikipedia.org/wiki/Degree_of_a_polynomial
+# https://en.wikipedia.org/wiki/Order_of_a_polynomial
 
-class Poly2D(StaticGridMixin, Model):
+def _check_order(o, ndim):
+    assert len(o) == ndim, 'Order tuple has incorrect number of items. ' \
+                           f'Expected {ndim}, received {len(o)}'
+
+
+class Poly2D(Model, StaticGridMixin):
     """Fittable 2d polynomial"""
 
-    # FIXME: currently does not use the StaticGridMixin
+    def __init__(self, multi_order):
+        """
+        A fittable 2-dimensional polynomial
 
-    def __init__(self, multi_degree):
+        Parameters
+        ----------
+        multi_order: 2-tuple of int
+            The order / degree of the polynomial along each dimension. i.e. The
+            dimensions of the coefficient matrix less one.
 
-        self.multi_order = np.add(multi_degree, 1)  # sy, sx
-
-        # coefficients increasing in power (y, x)
-        self.coeff = np.zeros(self.multi_order)
-
-        # mask over coefficient matrix for free / const parameters
-        self.free = np.ones(self.multi_order, bool)
+        """
+        self.n_coeff = self.coeff = self.free = None  # place holders for init
+        self.set_orders(multi_order)
         self._yixj = None
         # self.fit_variance = False
 
     def __call__(self, p, grid=None):
-        self.set_coeff(p)  # coefficients increasing in power (y, x)
         grid = self._check_grid(grid)
+        return self.eval(p, grid)
+
+    def eval(self, p, grid):
+        self.set_coeff(p)  # coefficients increasing in power (y, x)
         return polyval2d(*grid, self.coeff)
 
     def __str__(self):
-        return self._repr_matrix_product()
+        return repr_matrix_product(self.coeff)
 
     def __repr__(self):
-        return '%s%s' % (self.__class__.__name__, tuple(self.multi_order - 1))
+        return '%s%s' % (self.__class__.__name__, tuple(self.n_coeff - 1))
 
     def _repr_sum(self):
         s = '''\
             %s %s
              ∑ cᵢⱼ·𝑦ⁱ𝑥ʲ
             ᵢ ⱼ\
-            ''' % tuple(unicode.SUB_NRS[n] for n in self.multi_order[::-1])
+            ''' % tuple(unicode.SUB_NRS[n] for n in self.n_coeff[::-1])
         # ᵢ₌₀ ⱼ₌₀
         return textwrap.dedent(s)
 
-    def _repr_matrix_product(self):  # TODO: func not method
-        c = str(self.coeff)
-        ypr, xpr = map(vector_powers, 'yx', self.multi_order, (0, 1))
-        yo, xo = self.multi_order
-        skip_lines = (yo // 2) - int(not (yo % 2))
-        # pre_space = ' ' * (len(ypr) + 1)
-        # zip([''] + ypr.splitlines(), [''] + c.splitlines(), xpr.splitlines())
+    def set_orders(self, multi_order):
 
-        y_space = len(ypr)
-        c_space = max(map(len, c.splitlines()))
-
-        ylist = [''] * (skip_lines + 1) + [ypr]
-        clist = [''] + c.splitlines()
-        xlist = xpr.splitlines()
-        lines = []
-        for ys, cs, xs in itt.zip_longest(ylist, clist, xlist, fillvalue=''):
-            lines.append(
-                    '{:{}s} {:{}s} {:s}'.format(ys, y_space, cs, c_space, xs)
-            )
-        return '\n'.join(lines)
-
-    def set_orders(self, multi_degree):
-        self.multi_order = np.add(multi_degree, 1)  # sy, sx
+        _check_order(multi_order, 2)
+        self.n_coeff = np.add(multi_order, 1)  # sy, sx
 
         # coefficients increasing in power (y, x)
-        self.coeff = np.zeros(self.multi_order)
+        self.coeff = np.zeros(self.n_coeff)
 
         # mask over coefficient matrix for free / const parameters
-        self.free = np.ones(self.multi_order, bool)
+        self.free = np.ones(self.n_coeff, bool)
 
     def set_grid(self, grid):
         self._static_grid = grid
         # grid-dependent yⁱxʲ terms used to calculate jacobian
-        self._yixj = self.power_products(grid)
+        self._yixj = self.power_products(grid)  # TODO: lazy prop?
 
     def pre_process(self, p0, data, grid=None, stddev=None, *args, **kws):
         # remove masked data
@@ -2225,9 +2245,9 @@ class Poly2D(StaticGridMixin, Model):
 
         return p0, data, grid, stddev, args, kws
 
-    def power_products(self, grid):
+    def power_products(self, grid):  # jac_comp / jacobian_components
         # grid-dependent yⁱxʲ terms used to calculate jacobian
-        ij = np.indices(self.multi_order)
+        ij = np.indices(self.n_coeff)
         ixr = (slice(None), self.free) + (None,) * (grid.ndim - 1)
         return np.power(grid[:, None], ij[ixr]).prod(0)
 
@@ -2249,7 +2269,7 @@ class Poly2D(StaticGridMixin, Model):
         # point-to-point jacobian estimate)
         # Furthermore, this yields a performance optimization of ~20 %
         # compared to when jacobian is estimated from finite
-        # differences of objective function.
+        # differences of the objective function.
         return -2 * self._jacobian(p, data, grid, stddev).sum((-1, -2))
 
     def jacobian_fwrs(self, p, data, grid, stddev=None):
@@ -2296,7 +2316,7 @@ class Poly2D(StaticGridMixin, Model):
         return self.coeff[~self.free]
 
     def get_pnames(self, alpha='a', free=True, latex=False, unicode=False):
-        nrs = map(range, self.multi_order)
+        nrs = map(range, self.n_coeff)
         names = make_pnames_comb(alpha, *nrs, latex=latex,
                                  unicode=unicode)
 
@@ -2317,8 +2337,9 @@ class PPoly2D(Poly2D):  #
 
 
     """
+
     # TODO: SemanticNeighbours mixin?
-    _semantic_neighbours = ('top', 'left', 'bottom', 'right')
+    SEMANTIC_POS = ('top', 'left', 'bottom', 'right')
 
     def __init__(self, orders, smooth=True, continuous=True):
         """
@@ -2350,6 +2371,7 @@ class PPoly2D(Poly2D):  #
         self.set_freedoms()
 
     def set_coeff(self, p):
+        #
         super().set_coeff(p)
         self.apply_bc()
 
@@ -2369,7 +2391,7 @@ class PPoly2D(Poly2D):  #
                 j, i = 1, 1
             else:
                 # smoothness
-                j, i = np.ogrid[tuple(map(slice, self.multi_order))]
+                j, i = np.ogrid[tuple(map(slice, self.n_coeff))]
                 # 1st derivative multiplier :)
 
             # set coefficients for x-only terms
@@ -2388,7 +2410,7 @@ class PPoly2D(Poly2D):  #
 
     def get_neighbours(self):
         n = {}
-        for s in self._semantic_neighbours:
+        for s in self.SEMANTIC_POS:
             poly = getattr(self, s)
             if poly is not None:
                 n[s] = poly
@@ -2396,7 +2418,7 @@ class PPoly2D(Poly2D):  #
 
     def set_neighbours(self, **n):
         for s, o in n.items():
-            if s not in self._semantic_neighbours:
+            if s not in self.SEMANTIC_POS:
                 raise KeyError('%s is not a valid neighbour position' % s)
 
             if o.__class__.__name__ != 'PPoly2D':  # note auto-reload hack
@@ -2434,17 +2456,17 @@ class PPoly2D(Poly2D):  #
 
     def free_diagonal(self):
         i = self.smooth + self.continuous
-        r, c = np.diag_indices(self.multi_order.min())
-        rm, cm = self.multi_order
+        r, c = np.diag_indices(self.n_coeff.min())
+        rm, cm = self.n_coeff
         self.free[r[i:rm], c[i:cm]] = True
 
     def yield_coeff_subspaces(self, diagonal=True, max_dof_lsq=None):
 
-        yo, xo = self.multi_order
+        yo, xo = self.n_coeff
 
         if diagonal:
             # diagonal expansion into higher multi-orders
-            mo = np.c_[self.multi_order]
+            mo = np.c_[self.n_coeff]
             t = np.c_[self._tied_rows_cols].T
 
             # free = np.zeros((yo + xo, yo, xo), bool)
@@ -2555,16 +2577,225 @@ class PPoly2D(Poly2D):  #
 
         return params, goodness, ibest
 
-# class Poly2DHessian(HessianUpdateStrategy):
-#     def initialize(self, n, approx_type):
-#         self.h = np.empty((n, n))
-#         self.approx_type = approx_type
-#
-#     def get_matrix(self):
-#         return self.h
-#
-#     def dot(self, p):
-#         return self.h.dot(p)
-#
-#     def update(self, delta_x, delta_grad):
-#         pass
+
+from collections import namedtuple
+
+# simple container for 2-component objects
+yxTuple = namedtuple('yxTuple', ['y', 'x'])
+
+
+def _check_orders_knots(orders, knots):
+    # check consistency of knots and polynomial orders
+    k = knots[1:]  # no constraint provided by 1st knot (edge)
+
+    if isinstance(orders, float):
+        orders = int(orders)
+
+    if isinstance(orders, int):
+        orders = [orders] * len(k)
+
+    if len(orders) != len(k):
+        raise ValueError('Order / knot vector size mismatch: %i, %i. '
+                         'Knots should have size `len(orders) + 1`'
+                         % (len(orders), len(knots)))
+
+    # check knots are increasing order
+    if np.any(np.diff(knots) < 0):
+        raise ValueError('Knots should be of increasing order')
+
+    # TODO
+    # Might want to check the orders - if all 1, (straight lines) and
+    # continuous = True, this is actually just a straight line, and it's
+    # pointless to use a Spline2d, but will still work OK!
+
+    return np.array(orders, int), np.asarray(knots)
+
+
+from recipes.dict import AttrReadItem
+
+
+class PolyNeighbours(AttrReadItem):
+    """Helper class for managing neighbouring polynomials in a spline"""
+
+    SEMANTIC_POS = ('top', 'left', 'bottom', 'right')
+
+    def __setitem__(self, key, obj):
+        if key not in self.SEMANTIC_POS:
+            raise KeyError('%r is not a valid neighbour position' % key)
+
+        if isinstance(obj, PPoly2D):
+            raise TypeError(
+                    'Neighbouring polynomials should be `None` or `PPoly2D`'
+                    ' instances, not %r.' % obj.__class__.__name__)
+        #
+        super().__setitem__(key, obj)
+
+
+class NullTransform(object):
+    def __call__(self, grid):
+        return grid
+
+
+class DomainTransformMixin(object):
+    _domain_transform = NullTransform
+
+    @property
+    def domain_transform(self):
+        return self._domain_transform
+
+    @domain_transform.setter
+    def domain_transform(self, trans):
+        self.set_domain_transform(trans)
+
+    def set_domain_transform(self, trans):
+        if not callable(trans):
+            raise ValueError('transform should be callable')
+        self._domain_transform = trans
+
+
+class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
+    """
+    Two-dimensional polynomial object that shares a boundary with
+    another neighbouring 2d polynomial.
+
+    Automatically update the coefficient
+    matrix for dependent polynomials.
+
+    Dependent polys have restricted parameter spaces. These constraints are
+    imposed by (optional) continuity and smoothness conditions on the boundary
+    between polynomials.
+    """
+
+    def __init__(self, orders, smooth=True, continuous=True):
+        """
+        Initialize with 2-tuple of polynomial multi-order.
+
+
+        There are up to four
+        possible neighbours that depend on this polynomial.
+
+        Parameters
+        ----------
+        orders: tuple of int
+            The
+        """
+
+        # init parent
+        super().__init__(orders)
+
+        # neighbours
+        self.neighbours = PolyNeighbours()
+        self.depends_on = None
+        self.domain = None
+        self._static_domain_mask = None
+        # self.origin = 0 # np.array([[0], [0]])
+        # self.scale = 1
+
+        # set boundary conditions flags
+        self.continuous = bool(continuous)
+        self.smooth = bool(smooth) or self.continuous  # smooth if continuous
+        self._tied_rows_cols = (0, 0)
+
+        # set parameter freedom
+        self.set_freedoms()
+
+    def __call__(self, p, grid=None, out=None):
+        if grid is None:
+            # get static grid if available.  Assume here internal grid is
+            # already correct domain and form for `eval`.  Checks done inside
+            # `set_grid`
+            grid = self._check_grid(grid)
+            domain_mask = self._static_domain_mask
+        else:
+            # external grid provided.  Select domain
+            grid, domain_mask = self.in_domain(grid)
+            grid = self.domain_transform(grid)
+            # print('grid after transform', grid)
+
+        y = self.eval(p, grid)
+
+        if out is not None:
+            out[domain_mask] = y
+        return y
+
+    def set_grid(self, grid):
+        g, b = self.in_domain(grid)
+        super().set_grid(self.domain_transform(g))
+        self._static_domain_mask = b
+
+    def in_domain(self, grid):
+        if self.domain is None:
+            return grid
+
+        lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+        # noinspection PyUnresolvedReferences
+        b = ((lo <= grid) & (grid <= hi)).all(0)
+        return grid[:, b], b
+
+    def set_coeff(self, p):
+        super().set_coeff(p)
+        self.apply_bc()
+
+    def apply_bc(self):
+        """
+        Update coefficient matrices of neighbours applying the (optional)
+        smoothness and continuity conditions
+        """
+
+        # get internal domain
+        # y1, x1 = self.domain.ptp(1).astype(float)  #
+        y1, x1 = self.domain_transform(self.domain[:, 1, None])
+
+        # print('apply_bc')
+        # print('y1, x1', y1, x1)
+
+        c = self.coeff
+        for k in range(self.continuous + self.smooth):
+            # powers xⁱ·yʲ
+            j, i = np.ogrid[tuple(map(slice, (k, k), self.n_coeff))]
+
+            for name, poly in self.neighbours.items():
+                # set coefficients for x-only terms
+                if name == 'bottom':
+                    poly.coeff[k] = c[k]
+
+                # set coefficients for y-only terms
+                if name == 'left':
+                    poly.coeff[:, k] = c[:, k]
+
+                if name == 'top':  # x-only terms
+                    poly.coeff[k] = np.sum(
+                            c[k:] * (j ** k) * y1 ** (j - k), 0)
+
+                if name == 'right':  # y-only terms
+                    poly.coeff[:, k] = np.sum(
+                            c[:, k:] * (i ** k) * x1 ** (i - k), 1)
+
+    def set_neighbours(self, **n):
+        for s, o in n.items():
+            self.neighbours[s] = o
+
+            # set neighbours as object attributes
+            setattr(o, 'depends_on', self)
+            # setattr(self, s, o)
+            l = self.continuous + self.smooth
+            if s in ['left', 'right']:
+                o._tied_rows_cols = (0, l)  # (slice(None), slice(l, None))
+            else:
+                o._tied_rows_cols = (l, 0)  # (slice(l, None), slice(None))
+
+        # set the tied coefficients in neighbouring polys
+        self.apply_bc()
+        self.set_freedoms()
+
+    def set_freedoms(self):
+        n_tied = self.smooth + self.continuous
+        for name, poly in self.neighbours.items():
+            for i in range(n_tied):
+                # set coefficients for x-only terms
+                if name in ('top', 'bottom'):
+                    poly.free[i] = False
+
+                # set coefficients for y-only terms
+                if name in ('left', 'right'):
+                    poly.free[:, i] = False

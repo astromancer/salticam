@@ -5,12 +5,14 @@ Main photometry routine for SALTICAM slotmode
 # std libs
 import os
 import sys
-import logging
+import logging, logging.config
 import multiprocessing as mp
 from pathlib import Path
 
 # ===============================================================================
 # Check input file | doing this before all the slow imports
+from salticam.slotmode.deep_detect_tmp import deep_detect
+
 if __name__ == '__main__':
     import argparse
 
@@ -96,10 +98,7 @@ if __name__ == '__main__':
 import time  # @tidy.start # TODO
 import socket
 import itertools as itt
-import functools as ftl
 from multiprocessing.managers import SyncManager
-
-from collections import defaultdict, OrderedDict
 
 # execution time stamps
 from motley.profiler.timers import Chrono
@@ -122,12 +121,9 @@ chronos.mark('Imports: Local')
 import motley
 from salticam.slotmode import _pprint_header, _check_channels, \
     get_bad_pixel_mask
-from obstools.phot.tracking.core import cluster_id_stars, group_features, \
-    measure_positions_offsets, merge_segmentations, get_start_indices
 from salticam.slotmode.tracking import SlotModeTracker
 from salticam.slotmode.modelling.image import (FrameTransferBleed,
-                                               SlotModeBackground, FTB_WIDTH)
-from sklearn.cluster import OPTICS
+                                               SlotModeBackground)
 from graphical.imagine import ImageDisplay
 from graphical.multitab import MplMultiTab
 from recipes.dict import AttrReadItem
@@ -157,6 +153,8 @@ wtb.on()
 
 def GUESS_KNOTS():
     """special sentinel triggering knot guessing algorithm"""
+    # TODO make this a singleton so it plays along with auto-reload and
+    #  checking object ids via "is"
 
 
 def OPT_KNOTS():
@@ -294,25 +292,6 @@ def detect_measure(image, mask=False, background=None, snr=3., npixels=7,
     return seg, seg.com_bg(image)  # , counts
 
 
-def plot_clusters(ax, clf, xy, cmap='Spectral'):
-    from matplotlib.cm import get_cmap
-
-    X = np.vstack(xy)
-    core_sample_indices_, = np.where(clf.labels_ != -1)
-    labels_xy = clf.labels_[core_sample_indices_]
-
-    # plot
-    cmap = get_cmap(cmap)
-    colors = cmap(np.linspace(0, 1, labels_xy.max() + 1))
-    c = colors[clf.labels_[core_sample_indices_]]
-
-    # fig, ax = plt.subplots(figsize=im.figure.get_size_inches())
-    ax.scatter(*X[core_sample_indices_].T, edgecolors=c,
-               facecolors='none')
-    ax.plot(*X[clf.labels_ == -1].T, 'kx', alpha=0.3)
-    ax.grid()
-
-
 def init_mem_modelling(model, folder, n, n_knots, n_bright, n_resi=None,
                        fill=np.nan, clobber=False, **filenames):
     """
@@ -366,7 +345,7 @@ def init_mem_modelling(model, folder, n, n_knots, n_bright, n_resi=None,
 
     # TODO: merge into single image model
     shared_memory.bleeding = load_memmap(filenames_.bleeding,
-                                         (n_resi, n_bright, FTB_WIDTH),
+                                         (n_resi, n_bright, PHOTON_BLEED_WIDTH),
                                          float, fill, clobber)
 
     shared_memory.residuals = load_memmap(filenames_.residuals,
@@ -415,6 +394,7 @@ def spline_fit(i, image, spline, shared_memory, do_knot_search,
     # fit background
     p = spline.fit(image_scaled, **opt_kws)
     shared_memory.params[i] = tuple(r * scale for r in p.tolist())
+
     # p = shared_memory.params[i]
 
     # todo: need in-group evaluation for the statement below to work for the
@@ -433,23 +413,22 @@ def update_model_segments(tracker, models, ij_start, ishape):
     # since pickled clones of the model are used in each forked process when
     # doing optimization, the knot values are not preserved. we need to set
     # the knots
+
     # ishape = data.shape[-2:]
-
     spline, ftb = models
-
-    # knots = get_knots_from_mem(shared_memory.knots, ik, ishape)
     spline.set_knots(spline.knots, preserve_labels=False)
 
     # update segmentation for objects (camera offset)
     seg = tracker.get_segments(ij_start, ishape)
-    # FIXME: ftb regions may be wrong if over global segm boundary ....
+    # FIXME: photon bleed regions may be shaped smaller than memory expects
+    #  if bright stars near image boundary
 
     _, new_labels = spline.segm.add_segments(seg)
+    n_models = len(spline.models)
+    new_groups = {g: l + n_models for g, l in tracker.groups.items()}
+    # todo: better way - optimize!!!?
 
-    # todo: better way - optimize!!!
-    new_groups = {g: l + spline.nmodels for g, l in tracker.groups.items()}
-
-    # update streak labels
+    # update labels for photon bleed segments
     ftb.set_models(dict(zip(new_groups['streaks'], ftb.models.values())))
     return seg
 
@@ -475,7 +454,7 @@ def bgw(i, data, section, ij_start, tracker, models, shared_memory,
 
     # deal with knots
     do_knot_search = False
-    if knots is GUESS_KNOTS:
+    if knots is GUESS_KNOTS:  # knots.__name__ == 'GUESS_KNOTS':  #
         knots = spline.guess_knots(image, 1)  # args.channel
         shared_memory.knots[index_knots]['y'] = knots[0][1:-1]
         shared_memory.knots[index_knots]['x'] = knots[1][1:-1]
@@ -565,100 +544,6 @@ def background_loop(interval, data, tracker, ij_start, models,
         tracker.track_loop(range(i, i + n_comb), shared_memory.residuals)
         # do_update_segments = np.any(tracker.current_offset != ij_start)
         # ij_start = tracker.current_start
-
-
-def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
-                report=True):
-    # combine residuals
-    mr = np.ma.array(images)
-    mr.mask = bad_pixels  # BAD_PIXEL_MASK
-    xy_off = xy_offsets[indices_use]
-    mean_residuals = shift_combine(mr, xy_off, 'median', extend=True)
-    # better statistic at edges with median
-
-    # run deep detection on mean residuals
-    FTB_THRESH_COUNTS = 3e4
-    NPIXELS = (5, 3, 2)
-    DILATE = (2, 1)
-    seg_deep, groups_, info_, _, _ = \
-        detect_loop(mean_residuals,
-                    dilate=DILATE,
-                    npixels=NPIXELS,
-                    report=True)
-
-    # merge detection groups
-    groups = defaultdict(list)
-    for inf, grp in zip(info_, groups_):
-        groups[str(inf)].extend(grp)
-
-    # relabel bright stars
-    counts = seg_deep.count_sort(mean_residuals)
-    bright = np.where(counts > FTB_THRESH_COUNTS)[0]
-
-    ng = 2
-    g = groups_[:ng]
-    labels_bright = np.hstack(g)
-    last = labels_bright[-1]
-    cxx = seg_deep.com(mean_residuals, labels_bright)
-
-    if report:
-        from motley.table import Table
-        from recipes.pprint import numeric_array
-
-        gn = []
-        for i, k in enumerate(map(len, g)):
-            gn.extend([i] * k)
-
-        cc = numeric_array(counts[:last], precision=1, significant=3,
-                           switch=4).astype('O')
-        cc[bright] = list(map(motley.yellow, cc[bright]))
-        tbl = Table(np.column_stack([labels_bright, gn, cxx, cc]),
-                    title=(f'{last} brightest objects'
-                           '\nmean residual image'),
-                    col_headers=['label', 'group', 'y', 'x', 'counts'],
-                    minimalist=True, align=list('<<>>>'))
-
-        logger = logging.getLogger('root')
-        logger.info('\n' + str(tbl))
-
-    # return seg_deep, mean_residuals
-
-    # xy_track = tracker.segm.com(labels=tracker.use_labels)
-    # # ix_track = tuple(xy_track.round().astype(int).T)
-    # ix_track = tuple(np.round(xy_track + indices_start.min(0)).astype(int).T)
-    # old_labels = seg_deep.data[ix_track]
-    # new_labels = np.arange(1, old_labels.max() + 1)
-    # missing = set(new_labels) - set(old_labels)
-    # old_labels = np.hstack([old_labels, list(missing)])
-
-    # return seg_deep, old_labels, new_labels
-    # seg_deep.relabel_many(old_labels, new_labels)
-
-    # update tracker segments
-    # todo: let tracker keep track of minimal / maximal offsets
-    ranges = [np.floor(xy_off.min(0)) - np.floor(xy_offsets.min(0)),
-              np.ceil(xy_off.max(0)) - np.ceil(xy_offsets.max(0)) +
-              tracker.segm.shape]
-    section = tuple(map(slice, *np.array(ranges, int)))
-
-    # get new segments (tracker)
-    new_seg = np.zeros_like(tracker.segm.data)
-    new_seg[section] = seg_deep.data
-
-    # add ftb regions
-    new_seg, labels_streaks = FrameTransferBleed.adapt_segments(
-            new_seg, bright + 1)
-
-    # update tracker
-    tracker.segm.data = new_seg.data
-
-    # get new groups
-    new_groups = OrderedDict(bright=bright + 1)
-    new_groups.update(groups)
-    new_groups['streaks'] = labels_streaks
-    tracker.groups.update(new_groups)
-
-    return new_seg, mean_residuals, counts, tbl
 
 
 def phot_worker(i, proc, data, residue, tracker,
@@ -757,7 +642,7 @@ if __name__ == '__main__':
 
     paths.calib = resultsPath / 'calib'
     paths.flat = paths.calib / 'flat.npz'
-    # TODO: maybe flat.image.npz and flat.pixels.npz
+    # FIXME: better to save as array not dict!
 
     paths.phot = photPath = resultsPath / 'photometry'
     paths.photometry.opt_stat = photPath / 'opt.stat'
@@ -969,26 +854,32 @@ if __name__ == '__main__':
     SNR = 3
     NPIXELS = (5, 3, 2)
     DILATE = (2, 1)
-    # DETECT_KWS = dict(snr=SNR,
-    #                   npixels=NPIXELS[0],
-    #                   dilate=DILATE[0])
+    DETECT_KWS = dict(snr=SNR,
+                      npixels=NPIXELS[0],
+                      dilate=DILATE[0])
 
     # global background subtraction parameters
-    SPLINE_ORDERS = (3, 1, 3), (1, 3)
+    SPLINE_ORDERS = (3, 1, 3), (1, 5)
+    # TODO: find these automatically!!! Maybe start with cross section fit
+    #  then expand to 2d
     KNOT_SEARCH_EVERY = 5 * NCOMB
     n_bg = (subsize // NCOMB) + 1
     n_ks = subsize // KNOT_SEARCH_EVERY
     #
 
     # counts threshold for frame transfer bleed
-    FTB_THRESH_COUNTS = 3e4  # total object counts in electrons
-    # stars below this threshold will not be used to track camera movement
-    # TRACKING_SNR_THRESH = 1.25
+    PHOTON_BLEED_THRESH = 3e4  # total object counts in electrons
+    PHOTON_BLEED_WIDTH = 12
 
-    # acceptance fraction for valid detection across sample images
-    F_DETECT_ACCEPT = 0  # .15
-    # dilate final (global) segmentation image by this much
-    POST_MERGE_DILATE = 0
+    # TRACKING_SNR_THRESH = 1.25
+    # stars below this threshold will not be used to track camera movement
+
+    # params: measuring image offset
+    F_DET_REQ_DXY = 0.5  # detection frequency required for source to be used
+    P_ACC_REQ_DXY = 0.5  # positional accuracy required for source to be used
+    # params: segmentation
+    F_DET_REQ_SEG = 0.25  # detection frequency required when merging segments
+    POST_MERGE_DILATE = 0  # dilate final (global) segmentation image this much
 
     # task allocation
     # detectionTask = task(n_detect, '30%', time=True)(detect_with_model)
@@ -1030,12 +921,6 @@ if __name__ == '__main__':
                     paths.sample / 'images.dat',
                     sample_dims,
                     clobber=clobber)
-            seg_data = load_memmap(paths.sample / 'segmentations.dat',
-                                   # todo tmp
-                                   sample_dims,
-                                   int, 0,
-                                   clobber=clobber)
-            # FIXME: this doesn't really need to persist if you have global segm
             # ᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏ
 
             # //////////////////////////////////////////////////////////////////////
@@ -1054,139 +939,39 @@ if __name__ == '__main__':
                               f"(median {NCOMB} images:"
                               f" {t_exp * NCOMB} s exposure)"))
                 # not plotting positions on image since positions are
-                # relative to global segmentattion
-                # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                # relative to global segmentation
 
-            # detect stars (initial)
-            _detect_measure = ftl.partial(detect_measure,
-                                          mask=BAD_PIXEL_MASK,
-                                          npixels=NPIXELS[0],
-                                          dilate=DILATE[0])
-            segmentations, coms = zip(
-                    *pool.map(_detect_measure, sample_images))
-
-            # clustering + relative position measurement
-            logger.info('Identifying stars')
-            clf = OPTICS(min_samples=int(F_DETECT_ACCEPT * n_detect))
-            n_clusters, n_noise = cluster_id_stars(clf, coms)
-            xy, = group_features(clf, coms)
-            if args.plot:
-                import matplotlib.pyplot as plt
-
-                fig, ax = plt.subplots(figsize=im.figure.get_size_inches())
-                plot_clusters(ax, clf, xy, )
-                ax.set(**dict(zip(map('{}lim'.format, 'yx'),
-                                  tuple(zip((0, 0), ishape)))))
-
-            logger.info('Measuring relative positions')
-            distance_cut = 1
-            _, centres, σ_xy, xy_offsets, outliers = \
-                measure_positions_offsets(xy, distance_cut, F_DETECT_ACCEPT)
-
-            if args.plot:
-                'diagnostic for offset measure'
-
-            # combine segmentation images
-            seg_extended = merge_segmentations(
-                    segmentations, xy_offsets, True,  # extend
-                    F_DETECT_ACCEPT,  # merge_accept_ratio
-                    POST_MERGE_DILATE)
-
-            if args.plot:
-                display(seg_extended, 'Global segmentation 0')
-
-            # zero point for tracker (slices of the extended frame) correspond to
-            # minimum offset
-            xy_off_min = xy_offsets.min(0)
-            zero_point = np.floor(xy_off_min)
-
-            # since the merge process re-labels the stars, we have to ensure the
-            # order of the labels correspond to the order of the clusters.
-            # Do this by taking the label of the pixel nearest measured centers
-            # removed masked points from coordinate measurement
-            cxx = np.ma.getdata(centres) - zero_point
-            indices = cxx.round().astype(int)
-            cluster_labels = seg_extended.data[tuple(indices.T)]
-            ok = (cluster_labels != 0)
-
-            # Measure fluxes here. bright objects near edges of the slot
-            # have lower detection probability and usually only partially
-            # detected merged segmentation usually more complete for these
-            # sources which leads to more accurate flux measurement and
-            # therefore better change of flagging bright partial sources for
-            # photon bleed
-            llcs = get_start_indices(xy_offsets, zero_point)
-            counts = np.ma.masked_all(xy.shape[:-1])
-
-            # TODO: parallel
-            for i, (start, image) in enumerate(zip(llcs, samnple_images)):
-                seg = seg_extended.select_subset(start, image.shape)
-                counts[i, ok] = seg.flux(image)
-
-            # raise SystemExit
-
-            # //////////////////////////////////////////////////////////////////////
+            # ------------------------------------------------------------------
             # init tracker
-            # seg_extended, xy, centres, σ_xy, xy_offsets, outliers, zero_point = \
-            # tracker, xy, centres, xy_offsets, counts, counts_med = \
-            #     SlotModeTracker.from_images(sample_images,
-            #                                 BAD_PIXEL_MASK,
-            #                                 0.5,
-            #                                 # required_positional_accuracy
-            #                                 0.5,  # masked_ratio_max
-            #                                 0.5,  # SEG_MERGE_ACCEPT
-            #                                 POST_MERGE_DILATE,
-            #                                 True,  # flux_sort
-            #                                 FTB_THRESH_COUNTS,
-            #                                 FTB_WIDTH,
-            #                                 pool,
-            #                                 **DETECT_KWS)
-
-            # tracker, xy, centres, xy_offsets, counts, counts_med =
-            #     SlotModeTracker.from_measurements(
-            #             seg_data, coms, counts,
-            #             SEG_MERGE_ACCEPT,
-            #             POST_MERGE_DILATE,
-            #             0.5,  # required_positional_accuracy
-            #             0.5,  # masked_ratio_max
-            #             BAD_PIXEL_MASK,
-            #             FTB_THRESH_COUNTS,
-            #             FTB_WIDTH)
-            # TODO: print some info about the model: dof etc
-
-            # raise SystemExit
+            tracker, xy, centres, xy_offsets, counts, counts_med = \
+                SlotModeTracker.from_images(sample_images,
+                                            BAD_PIXEL_MASK,
+                                            P_ACC_REQ_DXY,
+                                            1,  # centre_distance_cut # kill??
+                                            F_DET_REQ_DXY,
+                                            F_DET_REQ_SEG,
+                                            POST_MERGE_DILATE,
+                                            True,  # flux_sort
+                                            PHOTON_BLEED_THRESH,
+                                            PHOTON_BLEED_WIDTH,
+                                            pool,
+                                            plot=idisplay,
+                                            **DETECT_KWS)
 
             n_bright = len(tracker.groups.bright)
             # n_track = tracker.nlabels
 
             # get indices for section of the extended segmentation
-            start = np.abs(
-                    (xy_offsets + tracker.zero_point).round().astype(int))
+            start = tracker.segm.get_start_indices(xy_offsets)
             stop = start + ishape
 
             # create masks
             tracker.masks.prepare()  # FIXME: do you even need this???
 
-            #
             # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            # TODO: separate Process for the plotting
-            if args.plot:
-                from obstools.phot.diagnostics import plot_position_measures
+            # TODO: show bad pixels ??
 
-                # segmentation
-                im = tracker.segm.display()
-                im.ax.set_title('Global segmentation (round 0)')
-                im.ax.plot(*(centres - tracker.zero_point).T[::-1], 'gx')
-
-                # positions
-                fig, axes = plot_position_measures(xy, centres, xy_offsets)
-                fig.suptitle('Position Measurements')
-
-                if args.live:
-                    idisplay(fig)
-                    idisplay(im.figure)
-            # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
+            # 🎨🖌-------------------------------------------------------------------
             # init background model todo:  method from_cube here ??
             logger.info(f'Combining {n_detect} sample images for background '
                         f'model initialization.')
@@ -1200,24 +985,37 @@ if __name__ == '__main__':
                 display(mean_image,
                         (f"Shift-combined image {t_exp * NCOMB * n_detect} s"
                          f" exposure)"))
-            # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-            logger.info('Initialize model')
-            model, _ = SlotModeBackground.from_image(mean_image,
-                                                     args.channel,
-                                                     SPLINE_ORDERS, )
-            # restrict model parameter space for now
-            # HACK
-            corner_labels = [5, 6]
-            for l in corner_labels:
-                m = model.models[l]
-                m.free[:] = False
-                m.free[2, 2:] = True
-                m.free[2:, 2] = True
-                # model.diagonal_freedom()
+            # ------------------------------------------------------------------
+            logger.info('Initializing image models')
+            # mask sources when trying to guess knots else statistics skewed
+            seg = tracker.segm.select_subset(
+                    -tracker.zero_point.astype(int), ishape)
+            mean_image_masked = seg.mask_foreground(mean_image)
 
-            # disable checks for nan/inf
-            model.do_checks = False
+            # Initialize spline background model guessing knots
+            # Use a sample image here and *not* the shift-combined image
+            # since the background structure can be smoothed out if the
+            # shifts between frames are significant.
+
+            splineBG, _ = SlotModeBackground.from_image(mean_image_masked,
+                                                        args.channel,
+                                                        SPLINE_ORDERS,
+                                                        detection=None,
+                                                        plot=idisplay)
+            s = f"""
+            Background model:  degrees of freedom = {splineBG.dof}
+            {splineBG!s}"""
+            logger.info(s)
+            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            # if args.plot:
+            #     # plot mean cross sections and guessed knot positions
+            #     im = ImageDisplay(mean_image)
+            #     for hv, k in zip('hv', splineBG.knots):
+            #         for kk in k[1:-1]:
+            #             getattr(im.ax, f'ax{hv}line')(kk, color='orange')
+            #     if args.live:
+            #         idisplay(im.figure)
 
             # some of the start indices may be masked (i.e. offset could not
             # be accurately measured in those sample images).  Choose `n_fit`
@@ -1229,25 +1027,42 @@ if __name__ == '__main__':
             indices_start = start[ix_use]
             indices_stop = indices_start + ishape
 
-            # add object detections
-            ext_image_section = tuple(
-                    map(slice, indices_start[0], indices_stop[0]))
-            # seg_data = tracker.segm.data[ext_image_section]
-            _, new_labels = model.segm.add_segments(
-                    tracker.segm.data[ext_image_section])
-            new_groups = {g: l + model.nmodels for g, l in
+            # add source regions to model so they can be modelled independently
+            _, new_labels = splineBG.segm.add_segments(
+                    tracker.segm.select_subset(indices_start[0], ishape))
+            new_groups = {g: l + len(splineBG.models) for g, l in
                           tracker.groups.items()}
             # model.groups.update(new_groups)
 
             # Frame transfer bleeding model
-            ftb = FrameTransferBleed(model.segm, new_groups['streaks'])
+            ftb = FrameTransferBleed(splineBG.segm, new_groups['streaks'],
+                                     width=PHOTON_BLEED_WIDTH)
+
+            # disable checks for nan/inf
+            splineBG.do_checks = False
             ftb.do_checks = False
 
-            models = (model, ftb)
+            models = (splineBG, ftb)
+
+            # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            if args.plot:
+                # model setup for mean image as test
+                splineBG.segm.display()
+
+            # restrict model parameter space for now
+            # HACK
+            corner_labels = [5, 6]
+            for l in corner_labels:
+                m = splineBG.models[l]
+                m.free[:] = False
+                m.free[2, 2:] = True
+                m.free[2:, 2] = True
+                # model.diagonal_freedom()
 
             # ᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏ
             # create shared memory (pre run)
-            shared_memory = init_mem_modelling(model, paths.modelling0, n_fit,
+            shared_memory = init_mem_modelling(splineBG, paths.modelling0,
+                                               n_fit,
                                                n_fit,
                                                n_bright, clobber=clobber)
             # shared_memory.residuals[:] = sample_images[ix_use]
@@ -1269,9 +1084,18 @@ if __name__ == '__main__':
             #
 
             gofs = []
-            knots = [GUESS_KNOTS] * n_fit
+            # knots = [GUESS_KNOTS] * n_fit
+            # FIXME: do you need this if you are guessing above on mean image ?
+
+            knots = [splineBG.knots] * n_fit
+
             p0 = [None] * n_fit
             counter = itt.count()
+
+            # HACK:
+            pool.close()
+            pool.join()
+
 
             while True:
                 t0 = time.time()
@@ -1290,7 +1114,7 @@ if __name__ == '__main__':
                     #  together.  However, the algorithm is exquisitely sensitive
                     #  to outliers such as can be introduced by cosmic ray hits.
                     #  For subtracting the background on individual frames it is
-                    #  far better to choose BFGS fitting algorithm that is more
+                    #  far better to choose BFGS algorithm which is more
                     #  robust against outliers.
 
                     # expand search to full model parameter space
@@ -1300,7 +1124,7 @@ if __name__ == '__main__':
                     # knots = pool.starmap(get_knots_from_mem,
                     #                      ((shared_memory.knots, i, ishape)
                     #                       for i in range(n_fit)))
-                    knots = [OPT_KNOTS] * n_fit
+                    # knots = [OPT_KNOTS] * n_fit
                     p0 = shared_memory.params
 
                 # reset counters for new loop
@@ -1309,7 +1133,7 @@ if __name__ == '__main__':
                 logger.info('Fitting sample images')
                 # do_knot_search = (count == 0)
                 # //////////////////////////////////////////////////////////////
-                successful = pool.starmap(
+                successful = itt.starmap(
                         preFitTask,
                         ((i, sample_images_to_model, i, indices_start[i],
                           tracker, models, shared_memory, knots[i], i,
@@ -1380,17 +1204,17 @@ if __name__ == '__main__':
                 for i, (ij0, image, params) in enumerate(
                         zip(indices_start, sample_images_to_model,
                             shared_memory.params)):
-                    #
+                    # tra
                     knots = get_knots_from_mem(shared_memory.knots, i, ishape)
-                    model.set_knots(knots, preserve_labels=False)
-                    seg, _ = model.segm.add_segments(
+                    splineBG.set_knots(knots, preserve_labels=False)
+                    seg, _ = splineBG.segm.add_segments(
                             tracker.get_segments(ij0, ishape),
                             copy=True)
                     mimage = tracker.prepare_image(image, ij0)
 
                     # TODO: include ftb model here
 
-                    fig = model.plot_fit_results(mimage, params, True, seg)
+                    fig = splineBG.plot_fit_results(mimage, params, True, seg)
                     ui.add_tab(fig, '%i:%s' % (i, pairs[i]))
 
                 ui.show()
@@ -1405,7 +1229,7 @@ if __name__ == '__main__':
         tracker.init_mem(subsize, paths.tracking, clobber=False)
         # note overwrite here since order of stars may change run-to-run
         # modelling results
-        shared_memory = init_mem_modelling(model, paths.modelling, n_bg,
+        shared_memory = init_mem_modelling(splineBG, paths.modelling, n_bg,
                                            n_ks, n_bright, n,
                                            clobber=clobber)
         # ᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏ
@@ -1428,7 +1252,7 @@ if __name__ == '__main__':
             #  manually change dof which is a bit hacky
             #  -todo: overwrite fit method??
             me = next(iter(ftb.models.values()))
-            me.dof = (NCOMB, FTB_WIDTH)
+            me.dof = (NCOMB, PHOTON_BLEED_WIDTH)
 
             # since we are tracking on residuals, disable snr weighting scheme
             tracker.snr_weighting = False
@@ -1613,7 +1437,7 @@ if __name__ == '__main__':
 
     except Exception as err:
         # catch errors so we can safely shut down the listeners
-        tb = ultratb.VerboseTB()
+        tb = ultratb.ColorTB()
         logger.error('Exception during parallel loop.\n%s',
                      tb.text(*sys.exc_info()))
 
