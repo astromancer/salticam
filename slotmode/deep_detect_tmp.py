@@ -9,6 +9,7 @@ from salticam.slotmode.modelling.image import FrameTransferBleed
 
 PHOTON_BLEED_WIDTH = 12
 
+
 def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
                 report=True):
     # combine residuals
@@ -19,7 +20,7 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     # better statistic at edges with median
 
     # run deep detection on mean residuals
-    PHOTON_BLEED_THRESH = 8e4   # FIXME: remove
+    PHOTON_BLEED_THRESH = 8e4  # FIXME: remove
     NPIXELS = (5, 3, 2)
     DILATE = (2, 1)
     seg_deep, groups_, info_, _, _ = \
@@ -40,43 +41,34 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     ng = 2
     g = groups_[:ng]
     labels_bright = np.hstack(g)
-    last = labels_bright[-1]
+    # last = labels_bright[-1]
     cxx = seg_deep.com(mean_residuals, labels_bright)
 
     if report:
-        try:
-            from motley.table import Table
-            from recipes.pprint import numeric_array
+        # TODO: separate groups by underline / curly brackets at end?
 
-            gn = []
-            for i, k in enumerate(map(len, g)):
-                gn.extend([i] * k)
+        from motley.table import Table
+        from recipes.pprint import numeric_array
 
-            cc = numeric_array(counts[:last], precision=1, significant=3,
-                               switch=4).astype('O')
-            cc[bright] = list(map(motley.yellow, cc[bright]))
-            tbl = Table(np.column_stack([labels_bright, gn, cxx, cc]),
-                        title=(f'{last} brightest objects'
-                               '\nmean residual image'),
-                        col_headers=['label', 'group', 'y', 'x', 'counts'],
-                        minimalist=True, align=list('<<>>>'))
+        gn = []
+        for i, k in enumerate(map(len, g)):
+            gn.extend([i] * k)
 
-            logger = logging.getLogger('root')
-            logger.info('\n' + str(tbl))
-        except Exception as err:
-            from IPython import embed
-            import traceback
-            import textwrap
-            embed(header=textwrap.dedent(
-                """\
-                Caught the following %s:
-                ------ Traceback ------
-                %s
-                -----------------------
-                Exception will be re-raised upon exiting this embedded interpreter.
-                """) % (err.__class__.__name__, traceback.format_exc()))
-            raise
+        cc = numeric_array(counts[labels_bright - 1], precision=1,
+                           significant=3,
+                           switch=4).astype('O')
 
+        cc[bright] = list(map(motley.yellow, cc[bright]))
+
+        tbl = Table.from_columns(
+                labels_bright, gn, cxx, cc,
+                title=(f'{len(labels_bright)} brightest objects'
+                       '\nmean residual image'),
+                col_headers=['label', 'group', 'y', 'x', 'counts'],
+                align=list('<<>>>'))
+
+        logger = logging.getLogger('root')
+        logger.info('\n' + str(tbl))
 
     # return seg_deep, mean_residuals
 
