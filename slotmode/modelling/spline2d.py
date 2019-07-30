@@ -750,6 +750,13 @@ class Spline2D_v2(CompoundModel):
                 neigh_pos = np.subtract(np.where(unused_neigh), np.atleast_2d(ij).T)
                 named_pos = map(SEMANTIC_IDX2POS.get, map(tuple, neigh_pos.T))
                 polys[ij].set_neighbours(**dict(zip(named_pos, children)))
+
+                # self.dependant[ij] = list(self.polys[b & ~used])
+
+                used |= b
+                used[ij] = True
+                if used.all():
+                    break
         except Exception as err:
             from IPython import embed
             import traceback
@@ -764,13 +771,6 @@ class Spline2D_v2(CompoundModel):
                 """) % (err.__class__.__name__, traceback.format_exc()))
             raise
 
-
-            # self.dependant[ij] = list(self.polys[b & ~used])
-
-            used |= b
-            used[ij] = True
-            if used.all():
-                break
 
         # init parent
         CompoundModel.__init__(self, polys[self._itr_order])
