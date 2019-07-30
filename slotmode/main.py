@@ -637,6 +637,7 @@ if __name__ == '__main__':
     paths.detection = resultsPath / 'detection'
     paths.sample = paths.detection / 'sample'
     paths.sample_offsets = paths.sample / 'xy_offsets.dat'
+
     paths.start_idx = paths.sample / 'start_idx.dat'  # todo: eliminate
     paths.segmentation = paths.detection / 'segmentationImage.dat'
 
@@ -909,9 +910,9 @@ if __name__ == '__main__':
             # todo: date.  do_version_check !
 
             tracker = load_pickle(paths.tracker)
-            models = model, ftb = load_pickle(paths.models)
-            start = np.load(paths.start_idx)  # TODO: eliminate
-            xy_offsets = np.load(paths.sample_offsets)
+            models = splineBG, ftb = load_pickle(paths.models)
+            start = load_pickle(paths.start_idx)  # TODO: eliminate
+            #xy_offsets = np.load(paths.sample_offsets)
             # need also to set a few variables
             n_bright = len(tracker.groups.bright)
 
