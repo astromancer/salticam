@@ -311,17 +311,18 @@ def init_mem_modelling(model, folder, n, n_knots, n_bright, n_resi=None,
     -------
 
     """
+    # TODO: residuals could be fits + add header info on bg sub
+
     # default filenames
     folder = Path(folder)
     filenames_ = dict(params='bg.par',
-                      # scales='sample_median.dat',
-                      knots='knots.dat',
-                      bleeding='bleeding.dat',
-                      residuals='residuals.dat',
-                      # TODO: FITS HERE!!!! + add header info on bg sub
-                      gof='chi2r.dat')
+                      knots='knots',
+                      bleeding='bleeding',
+                      residuals='residuals',
+                      gof='chi2r')
     filenames_.update(filenames)
-    filenames_ = AttrReadItem({_: folder / fn for _, fn in filenames_.items()})
+    filenames_ = AttrReadItem({_: (folder / fn).with_suffix(ext_np)
+                               for _, fn in filenames_.items()})
 
     if n_resi is None:
         n_resi = n
@@ -631,20 +632,21 @@ if __name__ == '__main__':
     paths.results = resultsPath = paths.input.parent
     # suffix = 'proc'
     # data_path.with_suffix(f'.ch{ch}.{suffix}')  #
+    ext_np = '.npy'
     paths.timestamps = paths.input.with_suffix('.time')
 
-    # FIXME: npy extensions for npy format files not dat
     paths.detection = resultsPath / 'detection'
     paths.sample = paths.detection / 'sample'
-    paths.sample_offsets = paths.sample / 'xy_offsets.dat'
+    paths.sample_offsets = (paths.sample / 'xy_offsets').with_suffix(ext_np)
 
-    paths.start_idx = paths.sample / 'start_idx.dat'  # todo: eliminate
-    paths.segmentation = paths.detection / 'segmentationImage.dat'
+    paths.start_idx = (paths.sample / 'start_idx').with_suffix(ext_np)
+    # todo: eliminate
+    paths.segmentation = (paths.detection / 'segmentationImage'
+                          ).with_suffix(ext_np)
 
     paths.modelling0 = paths.detection / 'modelling'
     paths.modelling = resultsPath / 'modelling'
     paths.models = paths.modelling / 'models.pkl'
-
 
     paths.tracking = resultsPath / 'tracking'
     paths.tracker = paths.tracking / 'tracker.pkl'
@@ -912,7 +914,7 @@ if __name__ == '__main__':
             tracker = load_pickle(paths.tracker)
             models = splineBG, ftb = load_pickle(paths.models)
             start = load_pickle(paths.start_idx)  # TODO: eliminate
-            #xy_offsets = np.load(paths.sample_offsets)
+            # xy_offsets = np.load(paths.sample_offsets)
             # xy_offsets = np.ma.MaskedArray(xy_offsets, np.isnan(xy_offsets))
             # need also to set a few variables
             n_bright = len(tracker.groups.bright)
@@ -926,7 +928,7 @@ if __name__ == '__main__':
             # ᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏ
             sample_dims = (n_detect,) + tuple(ishape)
             sample_images = load_memmap(
-                    paths.sample / 'images.dat',
+                    (paths.sample / 'images').with_suffix(ext_np),
                     sample_dims,
                     clobber=clobber)
             # ᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏᨏ
@@ -1201,7 +1203,6 @@ if __name__ == '__main__':
             np.save(paths.start_idx, start)  # todo: eliminate
             # save global segmentation as array
             np.save(paths.segmentation, seg_deep.data)
-
 
             # ֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍֍
             # # plot results of sample fits
