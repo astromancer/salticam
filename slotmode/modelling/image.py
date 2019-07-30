@@ -696,6 +696,10 @@ class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
             fig_x, axes_x = plt.subplots(2, 1, figsize=figsize)
             fig_y, axes_y = plt.subplots(2, 1, figsize=figsize)
 
+        #
+        logger.info('Guessing knot positions for image background spline '
+                    'model via `guess_knots_gradient_threshold`')
+
         yx_knots = []
         # xo, yo = offsets  # offsets (found empirically)
         for i in range(2):
@@ -728,7 +732,7 @@ class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
                 ax.axhspan(*(mm + np.multiply((-1, 1), (δσ * s))), color='g',
                            alpha=0.3)
                 ax.plot(w, dm[w], 'o', color='maroon', mfc='none')
-                ax.set_title('Cross section median gradient')
+                ax.set_title('Cross section median gradient (threshold)')
                 ax.set_xlabel(xy)
                 ax.set_ylabel(r'$\displaystyle\frac{\Delta f}{\Delta %s}$' % xy,
                               usetex=True, rotation='horizontal',

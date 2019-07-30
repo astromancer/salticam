@@ -19,7 +19,7 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     # better statistic at edges with median
 
     # run deep detection on mean residuals
-    PHOTON_BLEED_THRESH = 3e4   # FIXME: remove
+    PHOTON_BLEED_THRESH = 8e4   # FIXME: remove
     NPIXELS = (5, 3, 2)
     DILATE = (2, 1)
     seg_deep, groups_, info_, _, _ = \
@@ -32,8 +32,6 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     groups = defaultdict(list)
     for inf, grp in zip(info_, groups_):
         groups[str(inf)].extend(grp)
-
-    # return seg_deep, mean_residuals
 
     # relabel bright stars
     counts = seg_deep.count_sort(mean_residuals)

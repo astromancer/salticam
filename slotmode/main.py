@@ -97,6 +97,7 @@ if __name__ == '__main__':
 
 import time  # @tidy.start # TODO
 import socket
+import textwrap
 import itertools as itt
 from multiprocessing.managers import SyncManager
 
@@ -1003,9 +1004,9 @@ if __name__ == '__main__':
                                                         SPLINE_ORDERS,
                                                         detection=None,
                                                         plot=idisplay)
-            s = f"""
+            s = textwrap.dedent(f"""
             Background model:  degrees of freedom = {splineBG.dof}
-            {splineBG!s}"""
+            {splineBG!s}""")
             logger.info(s)
             # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             # if args.plot:
