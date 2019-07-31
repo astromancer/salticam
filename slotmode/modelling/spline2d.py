@@ -688,6 +688,25 @@ class ScaledTranslation(object):
 from obstools.modelling.core import CompoundModel, StaticGridMixin
 
 
+class PolynomialRepresentation(object):
+    'todo'
+
+
+class SplineRepresentations(object):
+    """Class containing methods for various representations of Spline2D"""
+    def __init__(self, model):
+        self.model = model
+
+    def coeff_blocks_colourised(self, free='default', tied='grey',
+                                fixed='.'):
+        ''
+
+    def piecewise(self, latex, unicode, matrix):
+        ''
+
+
+
+
 class Spline2D_v2(CompoundModel):
     """Non-uniform 2d polynomial spline for image / surface modelling"""
 
@@ -741,35 +760,22 @@ class Spline2D_v2(CompoundModel):
         # get dependent polys
         used = np.zeros(self.n_polys, bool)
         # self.dependant = {}
-        try:
-            for ij in zip(*self._itr_order):
-                b = self._get_neighbours_bool(*ij)
-                unused_neigh = b & ~used
-                children = list(polys[unused_neigh])
-                # positions of neighbours relative to current
-                neigh_pos = np.subtract(np.where(unused_neigh), np.atleast_2d(ij).T)
-                named_pos = map(SEMANTIC_IDX2POS.get, map(tuple, neigh_pos.T))
-                polys[ij].set_neighbours(**dict(zip(named_pos, children)))
 
-                # self.dependant[ij] = list(self.polys[b & ~used])
+        for ij in zip(*self._itr_order):
+            b = self._get_neighbours_bool(*ij)
+            unused_neigh = b & ~used
+            children = list(polys[unused_neigh])
+            # positions of neighbours relative to current
+            neigh_pos = np.subtract(np.where(unused_neigh), np.atleast_2d(ij).T)
+            named_pos = map(SEMANTIC_IDX2POS.get, map(tuple, neigh_pos.T))
+            polys[ij].set_neighbours(**dict(zip(named_pos, children)))
 
-                used |= b
-                used[ij] = True
-                if used.all():
-                    break
-        except Exception as err:
-            from IPython import embed
-            import traceback
-            import textwrap
-            embed(header=textwrap.dedent(
-                """\
-                Caught the following %s:
-                ------ Traceback ------
-                %s
-                -----------------------
-                Exception will be re-raised upon exiting this embedded interpreter.
-                """) % (err.__class__.__name__, traceback.format_exc()))
-            raise
+            # self.dependant[ij] = list(self.polys[b & ~used])
+
+            used |= b
+            used[ij] = True
+            if used.all():
+                break
 
 
         # init parent
@@ -856,7 +862,7 @@ class Spline2D_v2(CompoundModel):
 
     def get_iter_order(self):
         d = self._get_neighbours_dist(*self.primary)
-        return np.divmod(d.ravel().argsort(), len(d))
+        return np.unravel_index(d.ravel().argsort(), self.n_polys)
 
     def get_grid_order(self):
         gp = np.zeros(self.n_polys, int)
