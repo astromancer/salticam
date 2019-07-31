@@ -1106,21 +1106,19 @@ if __name__ == '__main__':
             # ------------------------------------------------------------------
             logger.info('Initializing image models')
             # mask sources when trying to guess knots else statistics skewed
-            seg = tracker.segm.select_subset(
-                    -tracker.zero_point.astype(int), ishape)
+            seg = tracker.segm.for_offset((0, 0), ishape)
             mean_image_masked = seg.mask_foreground(mean_image)
 
             # Initialize spline background model guessing knots
             # Use a sample image here and *not* the shift-combined image
             # since the background structure can be smoothed out if the
             # shifts between frames are significant.
-
             plot = idisplay if args.plot else False
             splineBG, _ = SlotModeBackground.from_image(mean_image_masked,
-                                                           args.channel,
-                                                           SPLINE_ORDERS,
-                                                           detection=None,
-                                                           plot=idisplay)
+                                                        args.channel,
+                                                        SPLINE_ORDERS,
+                                                        detection=None,
+                                                        plot=idisplay)
             # print some info about model
             s = textwrap.dedent(f"""
             Background model:  degrees of freedom = {splineBG.dof}

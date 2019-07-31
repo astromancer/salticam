@@ -10,6 +10,19 @@ FT_BLEED_WIDTH = 8             # TODO: kill ??
 
 class SlotModeTracker(StarTracker):
 
+    def get_segments(self, start, shape):
+        seg = super().get_segments(start, shape)
+
+        # dynamically add photon bleed regions.  This has to be done
+        # dynamically since large camera drift (beyond the maximal xy offsets
+        # that the GlobalSegmentation were constructed with) will cut the
+        # photon bleed regions before the edges of the image, and will
+        # therefore not be correct.
+
+
+
+
+
     # snr_cut = 1.5
     #
     # @classmethod
@@ -38,49 +51,52 @@ class SlotModeTracker(StarTracker):
     #     #         tracker.rcoo[tracker.bright - 1])
     #     return tracker, p0bg
 
-    @classmethod
-    def from_images(cls,  images, mask=None, required_positional_accuracy=0.5,
-                    centre_distance_max=1, f_detect_measure=0.5,
-                    f_detect_merge=0.2, post_merge_dilate=1, flux_sort=True,
-                    ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
-                    ft_bleed_width=FT_BLEED_WIDTH,
-                    worker_pool=None, report=None, plot=False, **detect_kws
-                    ):
+    # @classmethod
+    # def from_images(cls,  images, mask=None, required_positional_accuracy=0.5,
+    #                 centre_distance_max=1, f_detect_measure=0.5,
+    #                 f_detect_merge=0.2, post_merge_dilate=1, flux_sort=True,
+    #                 ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
+    #                 ft_bleed_width=FT_BLEED_WIDTH,
+    #                 worker_pool=None, report=None, plot=False, **detect_kws
+    #                 ):
+    #
+    #     tracker, xy, centres, xy_offsets, counts, counts_med = \
+    #         super().from_images(images, mask, required_positional_accuracy,
+    #                             centre_distance_max, f_detect_measure,
+    #                             f_detect_merge, post_merge_dilate, flux_sort,
+    #                             worker_pool, report, plot, **detect_kws)
+    #
+    #     # save object mask before adding streaks
+    #     tracker.masks['objects'] = tracker.masks.all  # fixme 'sources' better
+    #     tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
+    #                            ft_bleed_width)
+    #
+    #     return tracker, xy, centres, xy_offsets, counts, counts_med
 
-        tracker, xy, centres, xy_offsets, counts, counts_med = \
-            super().from_images(images, mask, required_positional_accuracy,
-                                centre_distance_max, f_detect_measure,
-                                f_detect_merge, post_merge_dilate, flux_sort,
-                                worker_pool, report, plot, **detect_kws)
+    # @classmethod
+    # def from_measurements(cls, segs, xy, counts, f_accept=0.2,
+    #                       post_merge_dilate=1, required_positional_accuracy=0.5,
+    #                       masked_ratio_max=0.9, bad_pixel_mask=None,
+    #                       ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
+    #                       ft_bleed_width=FT_BLEED_WIDTH):
+    #
+    #     # tracker, xy, centres, xy_offsets, counts, counts_med = \
+    #     return \
+    #         super().from_measurements(segs, xy, counts, f_accept,
+    #                                   post_merge_dilate,
+    #                                   required_positional_accuracy,
+    #                                   masked_ratio_max,
+    #                                   bad_pixel_mask)
+    #
+    #     # save object mask before adding streaks
+    #     tracker.masks['objects'] = tracker.masks.all  #
+    #     tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
+    #                            ft_bleed_width)
+    #
+    #     return tracker, xy, centres, xy_offsets, counts, counts_med
 
-        # save object mask before adding streaks
-        tracker.masks['objects'] = tracker.masks.all  # fixme 'sources' better
-        tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
-                               ft_bleed_width)
+    # def get_segments(self, start, shape):
 
-        return tracker, xy, centres, xy_offsets, counts, counts_med
-
-    @classmethod
-    def from_measurements(cls, segs, xy, counts, f_accept=0.2,
-                          post_merge_dilate=1, required_positional_accuracy=0.5,
-                          masked_ratio_max=0.9, bad_pixel_mask=None,
-                          ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
-                          ft_bleed_width=FT_BLEED_WIDTH):
-
-        # tracker, xy, centres, xy_offsets, counts, counts_med = \
-        return \
-            super().from_measurements(segs, xy, counts, f_accept,
-                                      post_merge_dilate,
-                                      required_positional_accuracy,
-                                      masked_ratio_max,
-                                      bad_pixel_mask)
-
-        # save object mask before adding streaks
-        tracker.masks['objects'] = tracker.masks.all  #
-        tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
-                               ft_bleed_width)
-
-        return tracker, xy, centres, xy_offsets, counts, counts_med
 
     def add_ft_regions(self, centres, counts, ft_bleed_threshold,
                        ft_bleed_width):
@@ -97,6 +113,14 @@ class SlotModeTracker(StarTracker):
 
         self.groups['bright'] = bright + 1
         self.groups['streaks'] = labels_streaks
+
+    def bright_star_labels(self, image, flx_thresh=1e3):
+        flx = self.segm.flux(image)
+        w, = np.where(flx > flx_thresh)
+        w = np.setdiff1d(w, self.ignore_labels)
+        coo = self.rcoo[w]
+        bsl = self.segm.data[tuple(coo.round(0).astype(int).T)]
+        return bsl
 
     # def __init__(self, coords, segm, label_groups=None, use_labels=None,
     #              bad_pixel_mask=None, edge_cutoffs=None, reference_index=0,
@@ -138,13 +162,7 @@ class SlotModeTracker(StarTracker):
     #     # self.streaks = self.get_streakmasks(com[:len(self.bright)])
     #     return com
 
-    def bright_star_labels(self, image, flx_thresh=1e3):
-        flx = self.segm.flux(image)
-        w, = np.where(flx > flx_thresh)
-        w = np.setdiff1d(w, self.ignore_labels)
-        coo = self.rcoo[w]
-        bsl = self.segm.data[tuple(coo.round(0).astype(int).T)]
-        return bsl
+
 
     # def mask_segments(self, image, mask=None):
     #     imbg = StarTracker.mask_segments(self, image, mask)

@@ -552,7 +552,6 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
         SegmentedImageModel.__init__(self, self.get_segmented_image(),
                                      list(self.models))
 
-
     @classmethod
     def from_image(cls, image, channel, orders, detection=None,
                    plot=False, **detect_opts):
@@ -648,15 +647,16 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
             fig_y, axes_y = plt.subplots(2, 1, figsize=figsize)
 
         #
+        method = guess_knots_gradient_threshold
         logger.info('Guessing knot positions for image background spline '
-                    'model via `guess_knots_gradient_threshold`')
+                    'model via `%s`', method.__name__)
 
         yx_knots = []
         # xo, yo = offsets  # offsets (found empirically)
         for i in range(2):
             #
             oi = int(not bool(i))
-            knots, (m, dm, mm, s, w) = guess_knots_gradient_threshold(
+            knots, (m, dm, mm, s, w) = method(
                     image, channel, i, n_knots[oi], δσ, edges)
             yx_knots.append(knots)
 
