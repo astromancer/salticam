@@ -196,18 +196,84 @@ class MedianEstimator(Model):
 #         # print(grid.shape)
 #         # return grid[self.axis, 0]  # zeroth row of x-grid
 
+import operator as op
 
-class PhotonBleed(Model):
+
+class PhotonBleed(object):
+    @classmethod
+    def from_segments(cls, seg, labels=None, loc=None, width=None):
+        #
+        if loc is None:
+            loc = seg.com(labels)
+
+        seg, labels = cls.adapt_segments(seg, labels, loc, width, copy=True)
+        return cls(seg, loc)
+
+    @staticmethod
+    def adapt_segments(seg, labels=None, loc=None, width=None,
+                       label_insert=None, copy=False):
+        """
+
+        Parameters
+        ----------
+        seg
+        labels
+        loc
+        width
+        label_insert
+        copy
+
+        Returns
+        -------
+
+        """
+
+        if not isinstance(seg, SegmentationHelper):
+            seg = SegmentationHelper(seg)
+
+        #
+        new = np.zeros(seg.shape, int)
+
+        if loc is None and labels is None:
+            raise ValueError('Either `labels` or `loc` should be given and not '
+                             '`None`')
+
+        if loc is None:
+            # use center of mass of segments for center of vertical bands
+            loc = seg.com(labels=labels)[:, 1]
+
+        if width is None:
+            # use width of segments for width of bands
+            start_stop = map(op.attrgetter('start', 'stop'),
+                             np.take(seg.slices.x, labels))
+            width = np.median(np.ptp(list(start_stop), 1))
+
+        # segment regions
+        rng = np.atleast_2d(loc) - 0.5 * np.multiply(width, [1, -1])[:, None]
+        rng = rng.round().astype(int).clip(0, seg.shape[1]).T
+        for i, r in enumerate(rng, 1):
+            new[:, slice(*r)] = i
+
+        # non-overlapping segments
+        new[seg.to_boolean()] = 0
+
+        if copy:
+            # return new object with only new segments
+            seg = seg.__class__(new)
+            return seg, seg.labels
+        else:
+            # add labels to existing segmentation image
+            return seg.add_segments(new, label_insert)
+
     def __init__(self):
         pass
-
 
 
 
 class FrameTransferBleed(SegmentedImageModel):
     @classmethod
     def from_image(cls, image, seg, flux_threshold=20, width=PHOTON_BLEED_WIDTH,
-                   labels=None,                   label_insert=None):
+                   labels=None, label_insert=None):
         """
 
         Parameters
@@ -638,7 +704,6 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
                             0,
                             clobber=clobber)
         return params, knots
-
 
 
 def guess_knots_gradient_threshold(image, channel, axis, n_knots, δσ=3,

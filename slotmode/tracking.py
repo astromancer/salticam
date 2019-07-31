@@ -54,7 +54,7 @@ class SlotModeTracker(StarTracker):
                                 worker_pool, report, plot, **detect_kws)
 
         # save object mask before adding streaks
-        tracker.masks['objects'] = tracker.masks.all  #
+        tracker.masks['objects'] = tracker.masks.all  # fixme 'sources' better
         tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
                                ft_bleed_width)
 
@@ -91,23 +91,7 @@ class SlotModeTracker(StarTracker):
         # if not len(self.use_labels):
         #     self.use_labels = bright
 
-        try:
-            loc = centres[bright, 1] - self.segm.zero_point[1]
-        except Exception as err:
-            from IPython import embed
-            import traceback
-            import textwrap
-            embed(header=textwrap.dedent(
-                """\
-                Caught the following %s:
-                ------ Traceback ------
-                %s
-                -----------------------
-                Exception will be re-raised upon exiting this embedded interpreter.
-                """) % (err.__class__.__name__, traceback.format_exc()))
-            raise
-
-
+        loc = centres[bright, 1] - self.segm.zero_point[1]
         _, labels_streaks = FrameTransferBleed.adapt_segments(
                 self.segm, loc=loc, width=ft_bleed_width)
 

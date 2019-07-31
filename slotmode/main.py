@@ -965,7 +965,9 @@ if __name__ == '__main__':
     DILATE = (2, 1)
     DETECT_KWS = dict(snr=SNR,
                       npixels=NPIXELS[0],
-                      dilate=DILATE[0])
+                      dilate=DILATE[0],
+                      edge_cutoff=5)
+    # get deeper initial detections by ignoring edges of frame
 
     # global background subtraction parameters
     SPLINE_ORDERS = (3, 1, 3), (1, 5)
