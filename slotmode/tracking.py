@@ -39,8 +39,7 @@ class SlotModeTracker(StarTracker):
                                  ft_bleed_width)
 
         # remember extremal offsets from construction
-        tracker._xy_off_min = xy_offsets.min(0)
-        tracker._xy_off_max = xy_offsets.max(0)
+        tracker.start_max = xy_offsets.max(0) - tracker.zero_point
 
         return tracker, xy, centres, xy_offsets, counts, counts_med
 
@@ -64,7 +63,12 @@ class SlotModeTracker(StarTracker):
         # photon bleed regions before the edges of the image, and will
         # therefore not be correct.
 
-        # check if this 
+        # check if this y offset is extremal
+        if np.any(start[0] < 0):
+            ''
+
+        if start >
+
 
         seg, labels_streaks = PhotonBleed.adapt_segments(
                 self.segm, loc=loc, width=width, copy=True)
