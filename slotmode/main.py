@@ -1113,24 +1113,17 @@ if __name__ == '__main__':
             # since the background structure can be smoothed out if the
             # shifts between frames are significant.
 
-            splineBG, _ = SlotModeBackground_V2.from_image(mean_image_masked,
+            plot = idisplay if args.plot else False
+            splineBG, _ = SlotModeBackground.from_image(mean_image_masked,
                                                            args.channel,
                                                            SPLINE_ORDERS,
                                                            detection=None,
                                                            plot=idisplay)
+            # print some info about model
             s = textwrap.dedent(f"""
             Background model:  degrees of freedom = {splineBG.dof}
             {splineBG!s}""")
             logger.info(s)
-            # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            # if args.plot:
-            #     # plot mean cross sections and guessed knot positions
-            #     im = ImageDisplay(mean_image)
-            #     for hv, k in zip('hv', splineBG.knots):
-            #         for kk in k[1:-1]:
-            #             getattr(im.ax, f'ax{hv}line')(kk, color='orange')
-            #     if args.live:
-            #         idisplay(im.figure)
 
             # some of the start indices may be masked (i.e. offset could not
             # be accurately measured in those sample images).  Choose `n_fit`

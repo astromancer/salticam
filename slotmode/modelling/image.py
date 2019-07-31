@@ -197,11 +197,17 @@ class MedianEstimator(Model):
 #         # return grid[self.axis, 0]  # zeroth row of x-grid
 
 
+class PhotonBleed(Model):
+    def __init__(self):
+        pass
+
+
+
+
 class FrameTransferBleed(SegmentedImageModel):
     @classmethod
     def from_image(cls, image, seg, flux_threshold=20, width=PHOTON_BLEED_WIDTH,
-                   labels=None,
-                   label_insert=None):
+                   labels=None,                   label_insert=None):
         """
 
         Parameters
