@@ -1147,8 +1147,8 @@ if __name__ == '__main__':
                     tracker.segm.select_subset(indices_start[0], ishape))
 
             # TODO: manage groups through segmentationImage to avoid line below
-            new_groups = {g: l + len(splineBG.models) for g, l in
-                          tracker.groups.items()}
+            # new_groups = {g: l + len(splineBG.models) for g, l in
+            #               tracker.groups.items()}
 
             # model.groups.update(new_groups)
 
