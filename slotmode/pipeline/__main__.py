@@ -513,6 +513,8 @@ def spline_fit(i, image, spline, shared_memory, do_knot_search,
 
 
 def update_model_segments(tracker, models, ij_start, ishape):
+    # FIXME: do you really need this method ???
+
     # set spline knots
     # since pickled clones of the model are used in each forked process when
     # doing optimization, the knot values are not preserved. we need to set
@@ -524,9 +526,8 @@ def update_model_segments(tracker, models, ij_start, ishape):
 
     # update segmentation for objects (camera offset)
     seg = tracker.get_segments(ij_start, ishape)
-    # FIXME: photon bleed regions may be shaped smaller than memory expects
-    #  if bright stars near image boundary
 
+    # FIXME: should not need this .... 
     _, new_labels = spline.segm.add_segments(seg)
     n_models = len(spline.models)
     new_groups = {g: l + n_models for g, l in tracker.groups.items()}
@@ -1138,8 +1139,13 @@ if __name__ == '__main__':
             # add source regions to model so they can be modelled independently
             _, new_labels = splineBG.segm.add_segments(
                     tracker.segm.select_subset(indices_start[0], ishape))
+
+            # TODO: manage groups through segmentationImage to avoid line below
             new_groups = {g: l + len(splineBG.models) for g, l in
                           tracker.groups.items()}
+
+
+
             # model.groups.update(new_groups)
 
             # Frame transfer bleeding model
