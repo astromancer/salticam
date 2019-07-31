@@ -2,8 +2,8 @@ import numpy as np
 
 from obstools.phot.tracking import StarTracker
 
-from . import get_bad_pixel_mask
-from .modelling.image import FrameTransferBleed, PhotonBleed
+# from . import get_bad_pixel_mask
+from .modelling.image import PhotonBleed
 
 
 # class SlotModeGlobalSegmentation(GlobalSegmentation):

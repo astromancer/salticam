@@ -694,6 +694,7 @@ class PolynomialRepresentation(object):
 
 class SplineRepresentations(object):
     """Class containing methods for various representations of Spline2D"""
+
     def __init__(self, model):
         self.model = model
 
@@ -703,8 +704,6 @@ class SplineRepresentations(object):
 
     def piecewise(self, latex, unicode, matrix):
         ''
-
-
 
 
 class Spline2D_v2(CompoundModel):
@@ -743,7 +742,6 @@ class Spline2D_v2(CompoundModel):
         # domain transform params
         origins, scale = self.get_domain_transform_params()
 
-
         # create polynomials
         polys = np.empty(self.n_polys, 'O')
         for i, j in self._ix.reshape((2, -1)).T:
@@ -776,7 +774,6 @@ class Spline2D_v2(CompoundModel):
             used[ij] = True
             if used.all():
                 break
-
 
         # init parent
         CompoundModel.__init__(self, polys[self._itr_order])

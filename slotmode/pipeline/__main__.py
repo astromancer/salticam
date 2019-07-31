@@ -504,9 +504,9 @@ def spline_fit(i, image, spline, shared_memory, do_knot_search,
     # todo: need in-group evaluation for the statement below to work for the
     #  hierarchical group model
     # use only fitted data to compute GoF
-    labels_bg = list(spline.models.keys())
-    mask = spline.segm.mask_segments(image, ignore_labels=labels_bg)
-    shared_memory.gof[i] = spline.redchi(p, mask)
+    # labels_bg = list(spline.models.keys())
+    # mask = spline.segm.mask_segments(image, ignore_labels=labels_bg)
+    shared_memory.gof[i] = spline.redchi(p, image)
 
     # TODO: sky measure overall noise with Gaussian fit ?
     return i
@@ -527,10 +527,10 @@ def update_model_segments(tracker, models, ij_start, ishape):
     # update segmentation for objects (camera offset)
     seg = tracker.get_segments(ij_start, ishape)
 
-    # FIXME: should not need this .... 
-    _, new_labels = spline.segm.add_segments(seg)
-    n_models = len(spline.models)
-    new_groups = {g: l + n_models for g, l in tracker.groups.items()}
+    # FIXME: should not need this ....
+    # _, new_labels = spline.segm.add_segments(seg)
+    # n_models = len(spline.models)
+    # new_groups = {g: l + n_models for g, l in tracker.groups.items()}
     # todo: better way - optimize!!!?
 
     # update labels for photon bleed segments
@@ -543,6 +543,8 @@ def bgw(i, data, section, ij_start, tracker, models, shared_memory,
     """"""
     # todo: rename i - index_params
     #
+    # models
+    spline, ftb = models
     opt_kws = opt_kws or {}
 
     # get image stack
@@ -551,16 +553,19 @@ def bgw(i, data, section, ij_start, tracker, models, shared_memory,
     # get sample background image (median filter across frames)
     msub = np.ma.array(subset, ndmin=3)
     image = np.ma.median(msub, 0)
+
+    # mask bad pixels
     if bad_pix is not None:
         image[bad_pix] = np.ma.masked
 
-    # models
-    spline, ftb = models
+    # mask sources
+    seg = tracker.get_segments(ij_start, image.shape)
+    image_masked = seg.mask_sources(image)
 
     # deal with knots
     do_knot_search = False
     if knots is GUESS_KNOTS:  # knots.__name__ == 'GUESS_KNOTS':  #
-        knots = spline.guess_knots(image, 1)  # args.channel
+        knots = spline.guess_knots(image_masked, 1)  # args.channel
         shared_memory.knots[index_knots]['y'] = knots[0][1:-1]
         shared_memory.knots[index_knots]['x'] = knots[1][1:-1]
         spline.set_knots(knots, preserve_labels=True)
@@ -571,13 +576,13 @@ def bgw(i, data, section, ij_start, tracker, models, shared_memory,
 
     # if do_update_segments:
     # note need to ensure knots have been set else fails below
-    ishape = data.shape[-2:]
+    # ishape = data.shape[-2:]
     # TODO: don not have to recompute if ij_start same. memoize
     # update segmentation for camera position
-    seg = update_model_segments(tracker, models, ij_start, ishape)
+    # seg = update_model_segments(tracker, models, ij_start, ishape)
 
     # fit vignetting
-    q = spline_fit(i, image, spline, shared_memory, do_knot_search,
+    q = spline_fit(i, image_masked, spline, shared_memory, do_knot_search,
                    index_knots, **opt_kws)
 
     if q is not None:
@@ -598,17 +603,18 @@ def aggregate_flat(flat, data, interval, tracker, start):
 def background_subtract(i, data, section, models, shared_memory, bad_pix):
     #
     spline, ftb = models
+    residuals = shared_memory.residuals
 
-    shared_memory.residuals[section] = spline.residuals(
-            shared_memory.params[i], data)
+    #
+    residuals[section] = spline.residuals(shared_memory.params[i], data)
 
     # remove frame transfer streaks
     if bad_pix is not None:
         data[..., bad_pix] = np.ma.masked
 
-    shared_memory.bleeding[section], resi = \
-        ftb.fit(shared_memory.residuals[section], reduce=True, keepdims=True)
-    shared_memory.residuals[section] = resi
+    shared_memory.bleeding[section], resi = ftb.fit(
+            residuals[section], reduce=True, keepdims=True)
+    residuals[section] = resi
     return resi
 
 
@@ -1143,8 +1149,6 @@ if __name__ == '__main__':
             # TODO: manage groups through segmentationImage to avoid line below
             new_groups = {g: l + len(splineBG.models) for g, l in
                           tracker.groups.items()}
-
-
 
             # model.groups.update(new_groups)
 
