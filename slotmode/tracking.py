@@ -1,20 +1,30 @@
 import numpy as np
-from obstools.phot.tracking import StarTracker
+from obstools.phot.segmentation import SegmentationHelper
+from obstools.phot.tracking import StarTracker, GlobalSegmentation
 
 from . import get_bad_pixel_mask
-from .modelling.image import FrameTransferBleed
+from .modelling.image import FrameTransferBleed, PhotonBleed
+
+
+class SlotModeGlobalSegmentation(GlobalSegmentation):
+    def for_offset(self, xy_offsets, shape, type_=SegmentationHelper):
+        seg = super().for_offset(xy_offsets, shape, type_)
+
+
+
+
 
 
 class SlotModeTracker(StarTracker):
     PHOTON_BLEED_THRESH = 3.e4
-    FT_BLEED_WIDTH = 8  # TODO: kill ??
+    PHOTON_BLEED_WIDTH = 8  # TODO: kill ??
 
     @classmethod
     def from_images(cls, images, mask=None, required_positional_accuracy=0.5,
                     centre_distance_max=1, f_detect_measure=0.5,
                     f_detect_merge=0.2, post_merge_dilate=1, flux_sort=True,
-                    ft_bleed_threshold=FT_BLEED_THRESH_COUNTS,
-                    ft_bleed_width=FT_BLEED_WIDTH,
+                    ft_bleed_threshold=PHOTON_BLEED_THRESH,
+                    ft_bleed_width=PHOTON_BLEED_WIDTH,
                     worker_pool=None, report=None, plot=False, **detect_kws
                     ):
         tracker, xy, centres, xy_offsets, counts, counts_med = \
@@ -25,10 +35,25 @@ class SlotModeTracker(StarTracker):
 
         # save object mask before adding streaks
         tracker.masks['sources'] = tracker.masks.all
-        # tracker.add_ft_regions(centres, counts_med, ft_bleed_threshold,
-        #                        ft_bleed_width)
+        tracker.add_photon_bleed(centres, counts_med, ft_bleed_threshold,
+                                 ft_bleed_width)
+
+        # remember extremal offsets from construction
+        tracker._xy_off_min = xy_offsets.min(0)
+        tracker._xy_off_max = xy_offsets.max(0)
 
         return tracker, xy, centres, xy_offsets, counts, counts_med
+
+    def add_photon_bleed(self, centres, counts, threshold, width):
+        # add regions affected by photon bleeding
+        bright,  = np.where(counts > threshold)
+
+        loc = centres[bright, 1] - self.segm.zero_point[1]
+        _, labels_streaks = PhotonBleed.adapt_segments(
+                self.segm, loc=loc, width=width)
+
+        self.groups['bright'] = bright + 1
+        self.groups['streaks'] = labels_streaks
 
     def get_segments(self, start, shape):
         seg = super().get_segments(start, shape)
@@ -38,6 +63,13 @@ class SlotModeTracker(StarTracker):
         # that the GlobalSegmentation were constructed with) will cut the
         # photon bleed regions before the edges of the image, and will
         # therefore not be correct.
+
+        # check if this 
+
+        seg, labels_streaks = PhotonBleed.adapt_segments(
+                self.segm, loc=loc, width=width, copy=True)
+
+        return seg
 
     # snr_cut = 1.5
     #
