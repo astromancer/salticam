@@ -1,18 +1,14 @@
 import numpy as np
-from obstools.phot.segmentation import SegmentationHelper
-from obstools.phot.tracking import StarTracker, GlobalSegmentation
+
+from obstools.phot.tracking import StarTracker
 
 from . import get_bad_pixel_mask
 from .modelling.image import FrameTransferBleed, PhotonBleed
 
 
-class SlotModeGlobalSegmentation(GlobalSegmentation):
-    def for_offset(self, xy_offsets, shape, type_=SegmentationHelper):
-        seg = super().for_offset(xy_offsets, shape, type_)
-
-
-
-
+# class SlotModeGlobalSegmentation(GlobalSegmentation):
+#     def for_offset(self, xy_offsets, shape, type_=SegmentationHelper):
+#         seg = super().for_offset(xy_offsets, shape, type_)
 
 
 class SlotModeTracker(StarTracker):
@@ -45,7 +41,7 @@ class SlotModeTracker(StarTracker):
 
     def add_photon_bleed(self, centres, counts, threshold, width):
         # add regions affected by photon bleeding
-        bright,  = np.where(counts > threshold)
+        bright, = np.where(counts > threshold)
 
         loc = centres[bright, 1] - self.segm.zero_point[1]
         _, labels_streaks = PhotonBleed.adapt_segments(
@@ -59,21 +55,36 @@ class SlotModeTracker(StarTracker):
 
         # dynamically add photon bleed regions.  This has to be done
         # dynamically since large camera drift (beyond the maximal xy offsets
-        # that the GlobalSegmentation were constructed with) will cut the
-        # photon bleed regions before the edges of the image, and will
+        # that the GlobalSegmentation were constructed with) will pad the
+        # image with zeros at the edges.  photon bleed regions will
         # therefore not be correct.
 
         # check if this y offset is extremal
-        if np.any(start[0] < 0):
-            ''
+        ys, xs = start
+        ymax = self.start_max[0]
+        ysl = None
+        if ys < 0:
+            ysl = slice(ys, None)
+        if ys > ymax:
+            ysl = slice(ymax - ys)
 
-        if start >
-
-
-        seg, labels_streaks = PhotonBleed.adapt_segments(
-                self.segm, loc=loc, width=width, copy=True)
+        if ysl is not None:
+            x_slices = self.segm.slices.x
+            _, xsh = self.segm.shape[1]
+            for lbl in self.groups['streaks']:
+                s = x_slices[lbl]
+                seg[max(0, s.start - xs):min(s.stop - xs, xsh), ysl] = \
+                    x_slices[lbl]
 
         return seg
+
+    # def bright_star_labels(self, image, flx_thresh=1e3):
+    #     flx = self.segm.flux(image)
+    #     w, = np.where(flx > flx_thresh)
+    #     w = np.setdiff1d(w, self.ignore_labels)
+    #     coo = self.rcoo[w]
+    #     bsl = self.segm.data[tuple(coo.round(0).astype(int).T)]
+    #     return bsl
 
     # snr_cut = 1.5
     #
@@ -125,29 +136,22 @@ class SlotModeTracker(StarTracker):
     #
     #     return tracker, xy, centres, xy_offsets, counts, counts_med
 
-    def add_ft_regions(self, centres, counts, ft_bleed_threshold,
-                       ft_bleed_width):
-        # add regions affected by frame transfer bleeding
-        bright = np.where(counts > ft_bleed_threshold)[0]
+    # def add_ft_regions(self, centres, counts, ft_bleed_threshold,
+    #                    ft_bleed_width):
+    #     # add regions affected by frame transfer bleeding
+    #     bright = np.where(counts > ft_bleed_threshold)[0]
+    #
+    #     # # HACK for if positions not accurate enough # FIXME
+    #     # if not len(self.use_labels):
+    #     #     self.use_labels = bright
+    #
+    #     loc = centres[bright, 1] - self.segm.zero_point[1]
+    #     _, labels_streaks = FrameTransferBleed.adapt_segments(
+    #             self.segm, loc=loc, width=ft_bleed_width)
+    #
+    #     self.groups['bright'] = bright + 1
+    #     self.groups['streaks'] = labels_streaks
 
-        # # HACK for if positions not accurate enough # FIXME
-        # if not len(self.use_labels):
-        #     self.use_labels = bright
-
-        loc = centres[bright, 1] - self.segm.zero_point[1]
-        _, labels_streaks = FrameTransferBleed.adapt_segments(
-                self.segm, loc=loc, width=ft_bleed_width)
-
-        self.groups['bright'] = bright + 1
-        self.groups['streaks'] = labels_streaks
-
-    def bright_star_labels(self, image, flx_thresh=1e3):
-        flx = self.segm.flux(image)
-        w, = np.where(flx > flx_thresh)
-        w = np.setdiff1d(w, self.ignore_labels)
-        coo = self.rcoo[w]
-        bsl = self.segm.data[tuple(coo.round(0).astype(int).T)]
-        return bsl
 
     # def __init__(self, coords, segm, label_groups=None, use_labels=None,
     #              bad_pixel_mask=None, edge_cutoffs=None, reference_index=0,
