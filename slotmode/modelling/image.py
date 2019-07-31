@@ -542,6 +542,8 @@ def spline_order_search1(cls, image, channel, report=None, **kws):
 from .spline2d import Spline2DImage
 
 
+
+
 class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
 
     def __init__(self, orders, knots, smooth=True, continuous=True,
@@ -549,6 +551,7 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
         Spline2DImage.__init__(self, orders, knots, smooth, continuous, primary)
         SegmentedImageModel.__init__(self, self.get_segmented_image(),
                                      list(self.models))
+
 
     @classmethod
     def from_image(cls, image, channel, orders, detection=None,
