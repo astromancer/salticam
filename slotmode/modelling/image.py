@@ -242,7 +242,9 @@ class PhotonBleedTest(object):
 
 class PhotonBleed(SegmentedImageModel):
     @classmethod
-    def from_image(cls, image, seg, flux_threshold=20, width=PHOTON_BLEED_WIDTH,
+    def from_image(cls, image, seg,
+                   flux_threshold=1.5e3, # counts / unbinned pixel
+                   width=PHOTON_BLEED_WIDTH,
                    labels=None, label_insert=None):
         """
 
@@ -274,7 +276,7 @@ class PhotonBleed(SegmentedImageModel):
         src_flux = flux_estimate(seg, image, labels)
         bright = seg.labels[src_flux > flux_threshold]
         if len(bright):
-            seg, new_labels = cls.adapt_segments(seg, bright, width,
+            seg, new_labels = cls.adapt_segments(seg, bright, None, width,
                                                  label_insert)
             obj = cls(seg, new_labels)
         else:
