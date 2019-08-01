@@ -16,7 +16,7 @@ from obstools.modelling.core import Model
 from obstools.phot.utils import shift_combine
 from obstools.modelling.image import SegmentedImageModel
 from obstools.phot.segmentation import SegmentationHelper, \
-    SegmentationGridHelper
+    SegmentationGridHelper, SourceDetectionMixin
 from obstools.modelling.core import UnconvergedOptimization
 
 # relative libs
@@ -533,7 +533,8 @@ def spline_order_search1(cls, image, channel, report=None, **kws):
 from .spline2d import Spline2DImage
 
 
-class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
+class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
+                            SourceDetectionMixin):
 
     def __init__(self, orders, knots, smooth=True, continuous=True,
                  primary=None):
@@ -567,15 +568,12 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
 
         """
 
-        # set default detection algorithm
-        if (detection is True) or detect_opts:
-            from obstools.phot.segmentation import SegmentationHelper
-            detection = SegmentationHelper.detect
-
         # Detect objects & segment image
-        run_detection = (detection not in (None, False))
+        run_detection = (detection is True) or detect_opts
         if run_detection:
-            seg = detection(image, False, None, **detect_opts)
+            seg, groups, info, result, residual = cls.detect(
+                    image, **detect_opts)
+            # mask sources for more accurate knot estimation
             image = seg.mask_sources(image)
 
         # run knot estimation
@@ -587,8 +585,9 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
         # add detected sources
         if run_detection:
             mdl.segm.add_segments(seg)
+            mdl.groups.update(groups)
 
-        return mdl, seg
+        return mdl
 
     @staticmethod
     def guess_knots(image, channel, δσ=3, n_knots=(1, 2), edges=True,
