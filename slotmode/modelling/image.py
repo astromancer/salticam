@@ -547,7 +547,7 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
                    **detect_opts):
         #
         """
-        Construct a Spline2D instance from an image and polynomial
+        Construct a instance from an image and polynomial
         multi-order.  Position of the knots will be estimated using the
         `guess_knots` method.
         Sources in the image will be identified using `detection`
