@@ -550,6 +550,7 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         Construct a instance from an image and polynomial
         multi-order.  Position of the knots will be estimated using the
         `guess_knots` method.
+
         Sources in the image will be identified using `detection`
         algorithm.  Segments for detected sources will be added to the
         segmented image.
@@ -569,23 +570,18 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         """
 
         # Detect objects & segment image
-        run_detection = (detection is True) or detect_opts
-        if run_detection:
-            seg, groups, info, result, residual = cls.detect(
-                    image, **detect_opts)
-            # mask sources for more accurate knot estimation
-            image = seg.mask_sources(image)
+        seg, groups, info, result, residual = cls.detect(image, detection,
+                                                         **detect_opts)
 
         # run knot estimation
-        knots = cls.guess_knots(image, channel, plot=plot)
+        knots = cls.guess_knots(seg.mask_sources(image), channel, plot=plot)
 
         # initialize
         mdl = cls(orders, knots)
 
         # add detected sources
-        if run_detection:
-            mdl.segm.add_segments(seg)
-            mdl.groups.update(groups)
+        mdl.segm.add_segments(seg)
+        mdl.groups.update(groups)
 
         return mdl
 
