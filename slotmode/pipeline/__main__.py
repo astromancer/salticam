@@ -124,7 +124,7 @@ import motley
 from salticam.slotmode import _pprint_header, _check_channels, \
     get_bad_pixel_mask
 from salticam.slotmode.tracking import SlotModeTracker
-from salticam.slotmode.modelling.image import (FrameTransferBleed,
+from salticam.slotmode.modelling.image import (PhotonBleed,
                                                SlotModeBackground,
                                                SlotModeBackground_V2)
 from graphical.imagine import ImageDisplay
@@ -355,18 +355,6 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
         logger = logging.getLogger('root')
         logger.info('\n' + str(tbl))
 
-    # return seg_deep, mean_residuals
-
-    # xy_track = tracker.segm.com(labels=tracker.use_labels)
-    # # ix_track = tuple(xy_track.round().astype(int).T)
-    # ix_track = tuple(np.round(xy_track + indices_start.min(0)).astype(int).T)
-    # old_labels = seg_deep.data[ix_track]
-    # new_labels = np.arange(1, old_labels.max() + 1)
-    # missing = set(new_labels) - set(old_labels)
-    # old_labels = np.hstack([old_labels, list(missing)])
-
-    # return seg_deep, old_labels, new_labels
-    # seg_deep.relabel_many(old_labels, new_labels)
 
     # update tracker segments
     # todo: let tracker keep track of minimal / maximal offsets
@@ -380,7 +368,7 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     new_seg[section] = seg_deep.data
 
     # add ftb regions
-    new_seg, labels_streaks = FrameTransferBleed.adapt_segments(
+    new_seg, labels_streaks = PhotonBleed.adapt_segments(
             new_seg, bright + 1, width=PHOTON_BLEED_WIDTH)
 
     # update tracker
@@ -586,8 +574,9 @@ def bgw(i, data, section, ij_start, tracker, models, shared_memory,
                    index_knots, **opt_kws)
 
     if q is not None:
-        resi = background_subtract(i, msub, section, models, shared_memory,
-                                   bad_pix)
+        ftb.set_segments(seg)
+        background_subtract(i, msub, section, models, shared_memory,
+                            bad_pix)
 
     return q
 
@@ -611,6 +600,8 @@ def background_subtract(i, data, section, models, shared_memory, bad_pix):
     # remove frame transfer streaks
     if bad_pix is not None:
         data[..., bad_pix] = np.ma.masked
+
+    # seg. tracker.groups['streaks']
 
     shared_memory.bleeding[section], resi = ftb.fit(
             residuals[section], reduce=True, keepdims=True)
@@ -1143,8 +1134,8 @@ if __name__ == '__main__':
             indices_stop = indices_start + ishape
 
             # add source regions to model so they can be modelled independently
-            _, new_labels = splineBG.segm.add_segments(
-                    tracker.segm.select_subset(indices_start[0], ishape))
+            # _, new_labels = splineBG.segm.add_segments(
+            #         tracker.segm.select_subset(indices_start[0], ishape))
 
             # TODO: manage groups through segmentationImage to avoid line below
             # new_groups = {g: l + len(splineBG.models) for g, l in
@@ -1153,8 +1144,8 @@ if __name__ == '__main__':
             # model.groups.update(new_groups)
 
             # Frame transfer bleeding model
-            ftb = FrameTransferBleed(splineBG.segm, new_groups['streaks'],
-                                     width=PHOTON_BLEED_WIDTH)
+            ftb = PhotonBleed(seg, tracker.groups['streaks'],
+                              width=PHOTON_BLEED_WIDTH)
 
             # disable checks for nan/inf
             splineBG.do_checks = False
@@ -1163,9 +1154,9 @@ if __name__ == '__main__':
             models = (splineBG, ftb)
 
             # 🎨🖌~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            if args.plot:
-                # model setup for mean image as test
-                splineBG.segm.display()
+            # if args.plot:
+            #     # model setup for mean image as test
+            #     splineBG.segm.display()
 
             # restrict model parameter space for now
             # HACK

@@ -3,7 +3,8 @@ import numpy as np
 from obstools.phot.tracking import StarTracker
 
 # from . import get_bad_pixel_mask
-from .modelling.image import PhotonBleed
+from .modelling.image import (PhotonBleed, PHOTON_BLEED_THRESH,
+                              PHOTON_BLEED_WIDTH)
 
 
 # class SlotModeGlobalSegmentation(GlobalSegmentation):
@@ -12,8 +13,6 @@ from .modelling.image import PhotonBleed
 
 
 class SlotModeTracker(StarTracker):
-    PHOTON_BLEED_THRESH = 3.e4
-    PHOTON_BLEED_WIDTH = 8  # TODO: kill ??
 
     @classmethod
     def from_images(cls, images, mask=None, required_positional_accuracy=0.5,
@@ -146,12 +145,11 @@ class SlotModeTracker(StarTracker):
     #     #     self.use_labels = bright
     #
     #     loc = centres[bright, 1] - self.segm.zero_point[1]
-    #     _, labels_streaks = FrameTransferBleed.adapt_segments(
+    #     _, labels_streaks = PhotonBleed.adapt_segments(
     #             self.segm, loc=loc, width=ft_bleed_width)
     #
     #     self.groups['bright'] = bright + 1
     #     self.groups['streaks'] = labels_streaks
-
 
     # def __init__(self, coords, segm, label_groups=None, use_labels=None,
     #              bad_pixel_mask=None, edge_cutoffs=None, reference_index=0,
@@ -167,7 +165,7 @@ class SlotModeTracker(StarTracker):
     #
     #     super().prep_masks_phot(labels)
     #
-    #     # seg_streak, lbls = FrameTransferBleed.adapt_segments(
+    #     # seg_streak, lbls = PhotonBleed.adapt_segments(
     #     #         self.segm, width=ft_bleed_width, copy=True)
     #     # self.mask_streaks = seg_streak.to_bool()
     #     not_streaks = ~self.mask_streaks

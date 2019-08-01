@@ -199,15 +199,7 @@ class MedianEstimator(Model):
 import operator as op
 
 
-class PhotonBleed(object):
-    @classmethod
-    def from_segments(cls, seg, labels=None, loc=None, width=None):
-        #
-        if loc is None:
-            loc = seg.com(labels)
-
-        seg, labels = cls.adapt_segments(seg, labels, loc, width, copy=True)
-        return cls(seg, loc)
+class PhotonBleedTest(object):
 
     @staticmethod
     def adapt_segments(seg, labels=None, loc=None, width=None,
@@ -269,8 +261,7 @@ class PhotonBleed(object):
         pass
 
 
-
-class FrameTransferBleed(SegmentedImageModel):
+class PhotonBleed(SegmentedImageModel):
     @classmethod
     def from_image(cls, image, seg, flux_threshold=20, width=PHOTON_BLEED_WIDTH,
                    labels=None, label_insert=None):
@@ -542,8 +533,6 @@ def spline_order_search1(cls, image, channel, report=None, **kws):
 from .spline2d import Spline2DImage
 
 
-
-
 class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
 
     def __init__(self, orders, knots, smooth=True, continuous=True,
@@ -553,42 +542,51 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel):
                                      list(self.models))
 
     @classmethod
-    def from_image(cls, image, channel, orders, detection=None,
-                   plot=False, **detect_opts):
+    def from_image(cls, image, channel, orders, plot=False, detection=None,
+                   **detect_opts):
         #
         """
         Construct a Spline2D instance from an image and polynomial
-        multi-order.  Position of the knots will be estimated based on the
-        median cross sections of the image. Objects (stars) in the image
-        will be identified using threshold detection algorithm.
+        multi-order.  Position of the knots will be estimated using the
+        `guess_knots` method.
+        Sources in the image will be identified using `detection`
+        algorithm.  Segments for detected sources will be added to the
+        segmented image.
 
         Parameters
         ----------
         image
         channel
         orders
+        plot
         detection
-
+        detect_opts
 
         Returns
         -------
 
         """
 
-        #
-        knots = cls.guess_knots(image, channel, plot=plot)
-        mdl = cls(orders, knots)
-        # mdl.groups['spline2d'] = mdl.segm.labels
-
-        # Detect objects & segment image
-        if detection is True or detect_opts:
+        # set default detection algorithm
+        if (detection is True) or detect_opts:
             from obstools.phot.segmentation import SegmentationHelper
             detection = SegmentationHelper.detect
 
-        if detection not in (None, False):
+        # Detect objects & segment image
+        run_detection = (detection not in (None, False))
+        if run_detection:
             seg = detection(image, False, None, **detect_opts)
-        else:
-            seg = mdl.segm
+            image = seg.mask_sources(image)
+
+        # run knot estimation
+        knots = cls.guess_knots(image, channel, plot=plot)
+
+        # initialize
+        mdl = cls(orders, knots)
+
+        # add detected sources
+        if run_detection:
+            mdl.segm.add_segments(seg)
 
         return mdl, seg
 
