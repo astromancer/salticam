@@ -543,7 +543,10 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
                                      list(self.models))
 
     @classmethod
-    def from_image(cls, image, channel, orders, plot=False, detect_sources=True,
+    def from_image(cls, image, channel, orders,
+                   photon_bleed_threshold=PHOTON_BLEED_THRESH,
+                   photon_bleed_width=PHOTON_BLEED_WIDTH,
+                   plot=False, detect_sources=True,
                    **detect_opts):
         #
         """
@@ -569,9 +572,12 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         """
 
         # Detect objects & segment image
-        
+        detect_opts.setdefault('max_iter', 1)
+        # needed to avoid detecting photon bleed as sources
         seg, groups, info, result, residual = cls.detect(image, detect_sources,
                                                          **detect_opts)
+
+
 
         # run knot estimation
         knots = cls.guess_knots(seg.mask_sources(image), channel, plot=plot)
