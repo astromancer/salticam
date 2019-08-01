@@ -93,38 +93,17 @@ def flux_estimate(seg, image, labels=None, label_bg=(0,)):
     if not isinstance(seg, SegmentationHelper):
         seg = SegmentationHelper(seg)
 
-    star_flux = seg.flux(image, labels, label_bg)
-    pixel_area = np.product(get_binning(image))
-    star_flux /= pixel_area
-    # note this is a global bg flux estimate which may not be very
-    #  accurate, but should be sufficient to find out which stars are
-    #  bright enough to cause bleeding
-    return star_flux
-
-
-def flux_estimate_annuli(image, seg, labels=None):
-    """
-
-    Parameters
-    ----------
-    seg
-    image
-    labels
-
-    Returns
-    -------
-
-    """
-    if not isinstance(seg, SegmentationHelper):
-        seg = SegmentationHelper(seg)
-
-    star_flux = seg.flux(image, labels, label_bg)
-    pixel_area = np.product(get_binning(image))
-    star_flux /= pixel_area
-    # note this is a global bg flux estimate which may not be very
-    #  accurate, but should be sufficient to find out which stars are
-    #  bright enough to cause bleeding
-    return star_flux
+    # estimate source counts
+    # With default `label_bg` the background count is estimated from global
+    # background which may not be very accurate, but should be sufficient to
+    # find out which stars are bright enough to cause photon bleeding during
+    # frame transfer.  For local background estimate, label_bg can be a
+    # `SegmentationImage`
+    src_flux = seg.flux(image, labels, label_bg)
+    # in order for the default threshold value to work for all binning values,
+    # we need to normalise flux to unbinned values
+    # divide by binned pixel_area
+    return src_flux / np.product(get_binning(image))
 
 
 def gauss1d(p, grid):
@@ -287,17 +266,17 @@ class PhotonBleed(SegmentedImageModel):
 
         if labels is None:
             labels = seg.labels_nonzero
-        if len(labels) == 0:
-            return seg, []
+        # if len(labels) == 0:
+        #     return seg, []
 
         # Decide based on flux in segments and threshold, which stars
         # need segments for modelling frame transfer bleeding
-        star_flux = flux_estimate(seg, image, labels)
-        bright = seg.labels[star_flux > flux_threshold]
+        src_flux = flux_estimate(seg, image, labels)
+        bright = seg.labels[src_flux > flux_threshold]
         if len(bright):
             seg, new_labels = cls.adapt_segments(seg, bright, width,
                                                  label_insert)
-            obj = cls()
+            obj = cls(seg, new_labels)
         else:
             obj = None
         return obj, seg, bright
@@ -306,11 +285,11 @@ class PhotonBleed(SegmentedImageModel):
     def from_segments(cls, seg, labels=None, loc=None,
                       width=PHOTON_BLEED_WIDTH):
         #
-        if loc is None:
-            loc = seg.com(labels)
+        # if loc is None:
+        #     loc = seg.com(labels)
 
         seg, labels = cls.adapt_segments(seg, labels, loc, width, copy=True)
-        return cls(seg, loc)
+        return cls(seg, labels)
 
     @staticmethod
     def adapt_segments(seg, labels=None, loc=None, width=PHOTON_BLEED_WIDTH,
@@ -562,6 +541,8 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         image
         channel
         orders
+        photon_bleed_threshold
+        photon_bleed_width
         plot
         detect_sources
         detect_opts
@@ -577,21 +558,23 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         seg, groups, info, result, residual = cls.detect(image, detect_sources,
                                                          **detect_opts)
 
-
-
         # run knot estimation
         knots = cls.guess_knots(seg.mask_sources(image), channel, plot=plot)
 
         # initialize
         mdl = cls(orders, knots)
 
-        #
+        # add photon bleed regions
+        ph, seg, bright = PhotonBleed.from_image(
+                image, seg, photon_bleed_threshold, photon_bleed_width)
 
+        # source label groups
+        groups = dict(zip(map(str, info), groups))
+        groups['bright'] = bright
 
         # add detected sources
         mdl.segm.add_segments(seg)
-        mdl.groups.update(dict(zip(info, groups)))
-
+        mdl.groups.update(groups)
         return mdl
 
     @staticmethod
