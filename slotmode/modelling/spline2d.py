@@ -113,7 +113,7 @@ class Spline2D(SegmentedImageModel):
             sizes = list(itt.product(*map(np.diff, self.knots)))
             sizes = np.reshape(sizes, self.n_polys + (2,))
             primary_segment = divmod(sizes.prod(-1).argmax(), self.n_polys[1])
-            # todo: maybe use self.segm.area.argmax()
+            # todo: maybe use self.seg.area.argmax()
 
         self.primary = pri = primary_segment
         yi = sorted(range(n_polys[0]), key=lambda i: np.abs(i - pri[0]))
@@ -133,8 +133,8 @@ class Spline2D(SegmentedImageModel):
 
         # calculate domain ranges
         domains = self.get_domain_ranges()
-        self.segm.domains = dict(zip(self.segm.labels, domains))
-        # self.coord_grids = self.segm.coord_grids
+        self.seg.domains = dict(zip(self.seg.labels, domains))
+        # self.coord_grids = self.seg.coord_grids
 
         # create grid of 2D polynomials
         for label, (i, j) in enumerate(self.iorder, 1):
@@ -146,39 +146,12 @@ class Spline2D(SegmentedImageModel):
             # poly2d_%i%i
             # add to container
             self.add_model(poly, label)
-            poly.set_grid(self.segm.coord_grids[label])
+            poly.set_grid(self.seg.coord_grids[label])
 
         # get neighbours
         for ij, poly in zip(self.iorder, self.models.values()):
             n = self.get_neighbours(*ij)
             poly.set_neighbours(**n)
-
-    def __call__(self, p, grid=None):
-        # TODO: with an actual grid ??
-
-        if isinstance(p, np.void):
-            p = Parameters(p)
-
-        # dof consistency check
-        self._check_params(p)
-
-        # grid check
-        # grid = self._check_grid(grid)
-
-        # broadcast output
-        # yg, xg = grid
-        # b = np.broadcast(yg, xg)
-        # out = np.empty(b.shape)  # result
-
-        #
-        out = np.zeros(self.ishape)
-
-        # update coefficient matrices
-        self.update_coeff(self.models[1])  # todo why before call
-
-        # compute and fill in regions for each poly
-        self.eval_loop(p, out)
-        return out
 
     def __str__(self):
         # multi-line string repr
@@ -207,6 +180,35 @@ class Spline2D(SegmentedImageModel):
     #     results = SegmentedImageModel.fit(self, data / scale, stddev)
     #     results[...] = tuple(r * scale for r in results.tolist())
     #     return results
+
+    def __call__(self, p, grid=None):
+
+        if isinstance(p, np.void):
+            p = Parameters(p)
+
+        # dof consistency check
+        p, grid = self._checks(p, grid)
+
+        # update coefficient matrices
+        self.update_coeff(self.models[1])  # todo why before call
+
+        # compute and fill in regions for each poly
+        out = np.zeros(self.ishape)
+        self.eval_loop(p, out)
+        return out
+
+    def eval_loop(self, p, out):
+        # compute and fill in regions for each poly
+        pp = self.split_params(p)
+        grids = self.seg.coord_grids
+        for i, ((lbl, slc), mdl) in enumerate(zip(self.seg.enum_slices(),
+                                                  self.models.values())):
+            ppp = pp[i]
+            if np.isnan(ppp).any():
+                continue
+
+            # fill the modelled segment in the output array
+            out[slc] = mdl(ppp, grids[lbl])
 
     def _check_params(self, p):
         if p.__class__.__name__ == 'Parameters':  # HACK auto-reload
@@ -240,19 +242,6 @@ class Spline2D(SegmentedImageModel):
             for poly, sl in zip(self.models.values(), slices):
                 p[sl] = poly.coeff[poly.free]
         return p
-
-    def eval_loop(self, p, out):
-        # compute and fill in regions for each poly
-        pp = self.split_params(p)
-        grids = self.segm.coord_grids
-        for i, ((lbl, slc), mdl) in enumerate(zip(self.segm.enum_slices(),
-                                                  self.models.values())):
-            ppp = pp[i]
-            if np.isnan(ppp).any():
-                continue
-
-            # fill the modelled segment in the output array
-            out[slc] = mdl(ppp, grids[lbl])
 
     def optimize_knots(self, image, range=(-3, 4), info='', report=True, **kws):
         """
@@ -484,10 +473,10 @@ class Spline2D(SegmentedImageModel):
         return domains
 
     def set_domains(self, domains):
-        self.segm.domains = domains
-        del self.segm.coord_grids  # delete lazy property
+        self.seg.domains = domains
+        del self.seg.coord_grids  # delete lazy property
         for label, poly in enumerate(self.models.values(), 1):
-            poly.set_grid(self.segm.coord_grids[label])
+            poly.set_grid(self.seg.coord_grids[label])
 
     # --------------------------------------------------------------------------
     # Parameter space restrictions
@@ -601,14 +590,14 @@ class Spline2D(SegmentedImageModel):
 
         if preserve_labels:
             # preserve any other segments "on top of" background
-            current = self.segm.labels
+            current = self.seg.labels
             keep = current[current > len(self.models)]
-            seg_obj = self.segm.keep(keep)
+            seg_obj = self.seg.keep(keep)
             mask = (seg_obj != 0)
             seg[mask] = seg_obj[mask]
 
         # update SegmentationImage
-        self.segm.data = seg
+        self.seg.data = seg
 
         # calculate new domains
         # domains = self.get_domain_ranges()
@@ -644,7 +633,7 @@ class Spline2D(SegmentedImageModel):
         fig = plot_modelled_image(self, image, result, seg)
 
         if result is not None and show_knots:
-            ishape = self.segm.shape
+            ishape = self.seg.shape
             for ax in fig.axes[2:3]:
                 ax.vlines(self.knots.x[1:], 0, ishape[0], 'k')
                 ax.hlines(self.knots.y[1:], 0, ishape[1], 'k')
@@ -672,27 +661,29 @@ def column_vector(v):
 
 class ScaledTranslation(object):
     def __init__(self, o, s):
-        self.o = column_vector(o)
-        self.s = column_vector(s)
+        self.o = np.asarray(o)  # column_vector(o)
+        self.s = np.asarray(s)  # column_vector(s)
 
     def __str__(self):  # TODO
         return f'{self.__class__.__name__}\ns={self.s!s}\no={self.o!s}'
 
     def __call__(self, yx):
-        return yx * self.s + self.o
+        yx = np.asarray(yx)
+        caster = (...,) + (None,) * (yx.ndim - 1)
+        return yx * self.s[caster] + self.o[caster]
 
     def inverse(self, yx):
         return (yx - self.o) / self.s
 
 
-from obstools.modelling.core import CompoundModel, StaticGridMixin
+from obstools.modelling.core import CompoundModel, FixedGrid
 
 
-class PolynomialRepresentation(object):
+class PolyRepr(object):
     'todo'
 
 
-class SplineRepresentations(object):
+class SplineRepr(object):
     """Class containing methods for various representations of Spline2D"""
 
     def __init__(self, model):
@@ -747,10 +738,10 @@ class Spline2D_v2(CompoundModel):
         for i, j in self._ix.reshape((2, -1)).T:
             # create 2d polynomial
             o = self.multi_order(i, j)  # multi-order 2-tuple
-            poly = polys[i, j] = PPoly2D_v2(o, smooth, continuous)
+            poly = polys[i, j] = PPoly2D_v2(o, domains[i, j],
+                                            smooth, continuous)
             # ensure unique names
             poly.name = f'{self.poly_name_base}{i}{j}'  # p₀₁ ?
-            poly.domain = domains[i, j]
             poly.domain_transform = ScaledTranslation(origins[i, j], scale)
             # poly.origin = origins[i, j, None].T
             # poly.scale = scale[None].T
@@ -769,7 +760,6 @@ class Spline2D_v2(CompoundModel):
             polys[ij].set_neighbours(**dict(zip(named_pos, children)))
 
             # self.dependant[ij] = list(self.polys[b & ~used])
-
             used |= b
             used[ij] = True
             if used.all():
@@ -795,26 +785,28 @@ class Spline2D_v2(CompoundModel):
             s += ',\n' * int(not i)
         return s
 
-    def __call__(self, p, grid):
+    def __call__(self, p, grid, out=None, **kws):
 
         # dof consistency check etc
-        p = self._check_params(p)
+        p, grid = self._checks(p, grid)
 
-        # initialize output array
-        out = np.zeros(np.shape(grid)[1:])
+        if out is None:
+            out_shape = np.shape(grid)[1:]
+            out = np.zeros(out_shape)
 
-        # compute and fill in regions for each poly
-        self.eval(p, grid, out)
-        return out
-
-    def eval(self, p, grid, out):
         # compute and fill in regions for each poly
         for mdl, pp in zip(self.models, self.split_params(p)):
+            # self.split_grid(grid)):
             if np.isnan(pp).any():
                 continue  # nans are ignored. perhaps warn ??
 
             # fill the modelled segment in the output array
             mdl(pp, grid, out)
+
+        return out
+
+    # NOTE: since this model does not implement eval, it will not be fittable.
+    #  leave fitting to subclasses
 
     def _check_params(self, p):
         #
@@ -867,7 +859,7 @@ class Spline2D_v2(CompoundModel):
         return gp
 
     def get_domains(self):
-        # the yx domains (lower upper) as implied by the knots
+        # array: the yx domains (lower upper) as implied by the knots
         domains = itt.product(*map(mit.pairwise, self.knots))
         return np.reshape(list(domains), self.n_polys + (2, 2))
 
@@ -901,6 +893,15 @@ class Spline2D_v2(CompoundModel):
 
         return np.split(p, np.cumsum(self.dofs))
 
+    def split_grid(self, grid):
+        domains = self.get_domains()
+        # reshape so that trailing dimensions of grid get added
+        lo, hi = np.moveaxis(domains, -1, 0)[(...,) + (None,) * (grid.ndim - 1)]
+        # boolean masks for domains of all polys.
+        # dimensions (npoly,) + (grid.shape[1:])
+        b = ((lo <= grid) & (grid <= hi)).all(-3)
+        return b[self._itr_order]
+
     def get_domain_transform_params(self):
         # get domain ranges for polys
         # For the spline to work with boundary constraints, we need each
@@ -916,8 +917,8 @@ class Spline2D_v2(CompoundModel):
         # physically meaningful in the image space.  Here we simply scale by
         # the image dimensions as (implied by the knots).  This means that
         # the internal domain of each polynomial will always be a sub-interval
-        # of [0, 1].  This aids numerical stability when fitting since powers
-        # of numbers greater than 1 tend to explode.
+        # of [0, 1].  This aids numerical stability when fitting higher
+        # orders since powers of numbers greater than 1 tend to explode.
 
         dom = self.get_domains()
         less = np.moveaxis(self._ix < np.array(self.primary, ndmin=3).T, 0, -1)
@@ -981,14 +982,14 @@ class Spline2D_v2(CompoundModel):
         return im
 
 
-class Spline2DImage(Spline2D_v2, StaticGridMixin):
+class Spline2DImage(Spline2D_v2):
 
     def __init__(self, orders, knots, smooth=True, continuous=True,
                  primary=None):
         super().__init__(orders, knots, smooth, continuous, primary)
 
         # create grid based on extremal knots
-        grid = np.indices((self.knots.y[-1], self.knots.x[-1]))
+        grid = np.indices(self.get_shape())
         for poly in self.models:
             # set static grid and static domain mask
             poly.set_grid(grid)
@@ -996,19 +997,20 @@ class Spline2DImage(Spline2D_v2, StaticGridMixin):
     def __call__(self, p, grid=None):
 
         # dof consistency check etc
-        p = self._check_params(p)
+        p, grid = self._checks(p, grid)
 
         # initialize output array
         if grid is None:
-            out_shape = (self.knots.y[-1], self.knots.x[-1])
+            out_shape = self.get_shape()
         else:
             out_shape = np.shape(grid)[1:]
+
         out = np.zeros(out_shape)
         # if grid not passed, it will still be `None` here which gets passed
         # through and we let component models set grids if needed
 
         # compute and fill in regions for each poly
-        self.eval(p, grid, out)
+        Spline2D_v2.__call__(p, grid, out)
         return out
 
     def get_shape(self):

@@ -11,7 +11,6 @@ from pathlib import Path
 
 # ===============================================================================
 # Check input file | doing this before all the slow imports
-from salticam.slotmode.deep_detect_tmp import deep_detect
 
 if __name__ == '__main__':
     import argparse
@@ -323,18 +322,19 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     counts = seg_deep.count_sort(mean_residuals)
     bright = np.where(counts > PHOTON_BLEED_THRESH)[0]
 
-    ng = 2
-    g = groups_[:ng]
-    labels_bright = np.hstack(g)
-    # last = labels_bright[-1]
-    cxx = seg_deep.com(mean_residuals, labels_bright)
-
     if report:
         # TODO: separate groups by underline / curly brackets at end?
 
         from motley.table import Table
         from recipes.pprint import numeric_array
 
+        ng = 2
+        g = groups_[:ng]
+        labels_bright = np.hstack(g)
+        # last = labels_bright[-1]
+        cxx = seg_deep.com(mean_residuals, labels_bright)
+
+        #
         gn = []
         for i, k in enumerate(map(len, g)):
             gn.extend([i] * k)
@@ -355,7 +355,6 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
         logger = logging.getLogger('root')
         logger.info('\n' + str(tbl))
 
-
     # update tracker segments
     # todo: let tracker keep track of minimal / maximal offsets
     ranges = [np.floor(xy_off.min(0)) - np.floor(xy_offsets.min(0)),
@@ -366,6 +365,8 @@ def deep_detect(images, tracker, xy_offsets, indices_use, bad_pixels,
     # get new segments (tracker)
     new_seg = np.zeros_like(tracker.segm.data)
     new_seg[section] = seg_deep.data
+
+    # FIXME: update code below for SlotModeBackground
 
     # add ftb regions
     new_seg, labels_streaks = PhotonBleed.adapt_segments(
@@ -594,17 +595,15 @@ def background_subtract(i, data, section, models, shared_memory, bad_pix):
     spline, ftb = models
     residuals = shared_memory.residuals
 
-    #
+    # remove vignetting
     residuals[section] = spline.residuals(shared_memory.params[i], data)
 
     # remove frame transfer streaks
     if bad_pix is not None:
         data[..., bad_pix] = np.ma.masked
-
-    # seg. tracker.groups['streaks']
-
-    shared_memory.bleeding[section], resi = ftb.fit(
-            residuals[section], reduce=True, keepdims=True)
+    #
+    shared_memory.bleeding[section], resi = ftb.fit(residuals[section],
+                                                    reduce=True, keepdims=True)
     residuals[section] = resi
     return resi
 

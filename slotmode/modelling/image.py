@@ -12,7 +12,7 @@ from scipy import ndimage
 from salticam.slotmode import get_binning, _check_channel
 from recipes.introspection.utils import get_module_name
 from obstools.stats import mad
-from obstools.modelling.core import Model
+from obstools.modelling.core import Model, FixedGrid
 from obstools.phot.utils import shift_combine
 from obstools.modelling.image import SegmentedImageModel
 from obstools.phot.segmentation import SegmentationHelper, \
@@ -22,8 +22,9 @@ from obstools.modelling.core import UnconvergedOptimization
 # relative libs
 from .spline2d import Spline2D
 
-PHOTON_BLEED_THRESH = 3e4
-PHOTON_BLEED_WIDTH = 10
+# Counts threshold value for photon bleed normalized to 1x1 binning
+PHOTON_BLEED_COUNT = 1.5e3  # PHOTON_BLEED_COUNT_1x1
+PHOTON_BLEED_WIDTH = 10  # same for width
 # TODO YOU CAN PROBABLY FIT THESE PARAMETERS WITH A GOOD MODEL
 
 # module level logger
@@ -76,36 +77,6 @@ def detect_combine(images, shifts, mask=False, background=None, snr=3.,
     return ndimage.label(eim > n_accept)
 
 
-def flux_estimate(seg, image, labels=None, label_bg=(0,)):
-    """
-
-    Parameters
-    ----------
-    seg
-    image
-    labels
-    label_bg
-
-    Returns
-    -------
-
-    """
-    if not isinstance(seg, SegmentationHelper):
-        seg = SegmentationHelper(seg)
-
-    # estimate source counts
-    # With default `label_bg` the background count is estimated from global
-    # background which may not be very accurate, but should be sufficient to
-    # find out which stars are bright enough to cause photon bleeding during
-    # frame transfer.  For local background estimate, label_bg can be a
-    # `SegmentationImage`
-    src_flux = seg.flux(image, labels, label_bg)
-    # in order for the default threshold value to work for all binning values,
-    # we need to normalise flux to unbinned values
-    # divide by binned pixel_area
-    return src_flux / np.product(get_binning(image))
-
-
 def gauss1d(p, grid):
     x0, z0, a = p
     _, gx = grid
@@ -113,45 +84,48 @@ def gauss1d(p, grid):
     return z0 * np.exp(-a * r)
 
 
-class VerticalGaussianStreaks(Model):
+class Gaussian1D(Model, FixedGrid):
+    dof = 2
 
-    def __init__(self, loc, grids):
-        self.dof = len(loc) + 1
-        self.loc = np.array(loc)
-        self.grids2 = np.square(np.array(grids) - self.loc)
-        self.ranges = np.transpose([(g.min(), g.max() + 1) for g in grids])
+    def __init__(self, x):
+        self.set_x(x)
 
-    def get_slice(self, offset):
-        return list(map(slice, *(self.ranges + offset)))
+    def set_grid(self, grid):
+        self.dx2 = np.square(np.subtract(grid, self.x))
 
-    def rss(self, p, data, grid=None):
-        self.rs(p, data, grid)
+    @property  # lazy?
+    def x(self):
+        return self._x
 
-    def __call__(self, p):
-        *z0, a = p
-        return z0 * np.array(list(map(np.exp, -a * self.grids2)))
+    @x.setter
+    def x(self, x):
+        self.set_x(x)
 
-        # return gauss1d(p, grid)
+    def set_x(self, x):
+        self._x = np.asarray(x)
+        self.dx2 = np.square(np.array(grids) - self.x)
 
-    # def p0guess(self, data, grid, std=None):
-    #     bg = data[[0, -1]].mean()
-    #     data_bg = data - bg
-    #     imx = data_bg.argmax()
-    #     z0 = data_bg[imx]
-    #     x0 = grid[imx]  # .data
-    #     # print('p0', (x0, z0, 1))
-    #     return (x0, z0, 1)
-    #
-    # def fit(self, data, grid, stddev=None, p0=None, **kws):
-    #     # print(Gaussian1D)
-    #     # print(grid)
-    #     bounds = [(grid.min(), grid.max()), (0, 1e6), (0, 1e2)]
-    #     # TODO:  include in staticGridMixin?
-    #     return Model.fit(self, data, grid, stddev, p0, bounds=bounds, **kws)
+    def eval(self, p):
+        # free params gaussian amplitude, and precision
+        return p[0] * np.exp(-p1[1] * self.dx2)
 
 
 class MedianEstimator(Model):
+    """
+    Class that emulates `Model` for semi-empirical statistical modelling.
+    """
+    # note: This class is useful to remove photon bleed when learning the
+    #  source distribution (segmentation), but you probably don't actually
+    #  want to use it in production since it will deliver bad results for
+    #  small number statistics - eg. in the case of bright sources having
+    #  multiple other sources that sit inside the photon bleed region, the
+    #  total number of background pixels (summed vertically along ccd column)
+    #  may become small.  In this case `VerticalGaussianBand` would be less
+    #  biased and more accurate.
     axis = -2
+
+    def __init__(self, size):
+        self.dof = size
 
     def fit(self, data, grid=None, stddev=None, p0=None, *args, **kws):
         return np.ma.median(data, self.axis, **kws)
@@ -159,92 +133,30 @@ class MedianEstimator(Model):
     def residuals(self, p, data, grid=None):
         return data - p
 
+    def set_grid(self, grid):
+        pass  # hack
+
     # def p0guess(self, data, grid=None, stddev=None):
     #     return
 
 
-# class VerticalGaussianStreak(Gaussian1D):  # SummaryStatFitter
-#     # name = 'bleed'
-#
-#     def __init__(self):
-#         SummaryStatFitter.__init__(self, 1, 2)
-#
-#     def adapt_grid(self, grid):
-#         return grid[self.axis, 0]
-#         # print(Streak)
-#         # print(grid.shape)
-#         # return grid[self.axis, 0]  # zeroth row of x-grid
-
 import operator as op
 
 
-class PhotonBleedTest(object):
-
-    @staticmethod
-    def adapt_segments(seg, labels=None, loc=None, width=None,
-                       label_insert=None, copy=False):
-        """
-
-        Parameters
-        ----------
-        seg
-        labels
-        loc
-        width
-        label_insert
-        copy
-
-        Returns
-        -------
-
-        """
-
-        if not isinstance(seg, SegmentationHelper):
-            seg = SegmentationHelper(seg)
-
-        #
-        new = np.zeros(seg.shape, int)
-
-        if loc is None and labels is None:
-            raise ValueError('Either `labels` or `loc` should be given and not '
-                             '`None`')
-
-        if loc is None:
-            # use center of mass of segments for center of vertical bands
-            loc = seg.com(labels=labels)[:, 1]
-
-        if width is None:
-            # use width of segments for width of bands
-            start_stop = map(op.attrgetter('start', 'stop'),
-                             np.take(seg.slices.x, labels))
-            width = np.median(np.ptp(list(start_stop), 1))
-
-        # segment regions
-        rng = np.atleast_2d(loc) - 0.5 * np.multiply(width, [1, -1])[:, None]
-        rng = rng.round().astype(int).clip(0, seg.shape[1]).T
-        for i, r in enumerate(rng, 1):
-            new[:, slice(*r)] = i
-
-        # non-overlapping segments
-        new[seg.to_boolean()] = 0
-
-        if copy:
-            # return new object with only new segments
-            seg = seg.__class__(new)
-            return seg, seg.labels
-        else:
-            # add labels to existing segmentation image
-            return seg.add_segments(new, label_insert)
-
-    def __init__(self):
-        pass
+def get_x_width(seg, labels):
+    # use median width of segments for width of bands
+    start_stop = map(op.attrgetter('start', 'stop'),
+                     np.take(seg.slices.x, labels - 1))
+    return np.median(np.ptp(list(start_stop), 1)).astype(int)
 
 
 class PhotonBleed(SegmentedImageModel):
+    _model_cls = MedianEstimator
+
     @classmethod
-    def from_image(cls, image, seg,
-                   flux_threshold=1.5e3, # counts / unbinned pixel
-                   width=PHOTON_BLEED_WIDTH,
+    def from_image(cls, image, seg=None,
+                   flux_threshold=None,  # counts
+                   width=None,
                    labels=None, label_insert=None):
         """
 
@@ -261,40 +173,65 @@ class PhotonBleed(SegmentedImageModel):
         -------
 
         """
-        # todo: default width should be in unbinned pixels?
+        if seg is None:
+            raise NotImplementedError('run detection?')
 
         if not isinstance(seg, SegmentationHelper):
             seg = SegmentationHelper(seg)
 
         if labels is None:
             labels = seg.labels_nonzero
-        # if len(labels) == 0:
-        #     return seg, []
 
-        # Decide based on flux in segments and threshold, which stars
-        # need segments for modelling frame transfer bleeding
-        src_flux = flux_estimate(seg, image, labels)
-        bright = seg.labels[src_flux > flux_threshold]
+        if len(labels) == 0:
+            cls.logger.warning('No sources in segmented image')
+            return cls(seg, []), seg, []
+
+        # Here we decide based on flux in segments and `threshold`, which
+        # sources are bright enough to cause photon bleed during frame transfer.
+        # With default `label_bg` the background count is estimated from global
+        # background which may not be very accurate for images with strong
+        # gradient, but should be sufficient to find out which stars are
+        # bright enough to cause photon bleeding. For local background
+        # estimate, label_bg can be a `SegmentationImage`
+        src_flx = seg.flux(image, labels, (0,))
+        if flux_threshold is None:
+            # in order for the default threshold value to work for all binning
+            # values, we need to normalise flux to unbinned values by dividing
+            # by binned pixel_area
+            binning = get_binning(image)
+            flux_threshold = PHOTON_BLEED_COUNT * np.product(binning)
+
+        bright = seg.labels[src_flx > flux_threshold]
         if len(bright):
-            seg, new_labels = cls.adapt_segments(seg, bright, None, width,
-                                                 label_insert)
-            obj = cls(seg, new_labels)
+            obj = cls(seg, bright, adapt=True, width=width)
         else:
             obj = None
+
         return obj, seg, bright
 
     @classmethod
-    def from_segments(cls, seg, labels=None, loc=None,
-                      width=PHOTON_BLEED_WIDTH):
-        #
-        # if loc is None:
-        #     loc = seg.com(labels)
+    def from_segments(cls, seg, labels=None, x=None, width=None):
+        """
+        Initialize from segmented image, adding new labeled segments
+        for the regions above and below the sources with
+        `labels`, or alternatively at the x-positions given by `x`.
 
-        seg, labels = cls.adapt_segments(seg, labels, loc, width, copy=True)
+        Parameters
+        ----------
+        seg
+        labels
+        x
+        width
+
+        Returns
+        -------
+
+        """
+        seg, labels = cls.adapt_segments(seg, labels, x, width, copy=True)
         return cls(seg, labels)
 
     @staticmethod
-    def adapt_segments(seg, labels=None, loc=None, width=PHOTON_BLEED_WIDTH,
+    def adapt_segments(seg, labels=None, x=None, width=None,
                        label_insert=None, copy=False):
         """
 
@@ -302,7 +239,7 @@ class PhotonBleed(SegmentedImageModel):
         ----------
         seg
         labels
-        loc
+        x
         width
         label_insert
         copy
@@ -315,19 +252,20 @@ class PhotonBleed(SegmentedImageModel):
         if not isinstance(seg, SegmentationHelper):
             seg = SegmentationHelper(seg)
 
-        #
-        new = np.zeros(seg.shape, int)
-
-        if loc is None and labels is None:
-            raise ValueError('Either labels or loc should be given and not '
+        if (x is None) and (labels is None):
+            raise ValueError('Either labels or x should be given and not '
                              'None')
 
-        if loc is None:
-            loc = seg.com(labels=labels)[:, 1]
+        if x is None:
+            x = seg.com(labels=labels)[:, 1]
+
+        if width is None:
+            width = get_x_width(seg, labels)
 
         # segment regions
-        rng = np.atleast_2d(loc) - 0.5 * np.multiply(width, [1, -1])[:, None]
+        rng = np.atleast_2d(x) - 0.5 * np.multiply(width, [1, -1])[:, None]
         rng = rng.round().astype(int).clip(0, seg.shape[1]).T
+        new = np.zeros(seg.shape, int)
         for i, r in enumerate(rng, 1):
             new[:, slice(*r)] = i
 
@@ -340,48 +278,62 @@ class PhotonBleed(SegmentedImageModel):
         else:
             return seg.add_segments(new, label_insert)
 
-    def __init__(self, segm, labels, adapt=False, width=PHOTON_BLEED_WIDTH):
+    def __init__(self, seg, labels, models=None, adapt=False, width=None,
+                 label_insert=None):
 
-        invalid = np.setdiff1d(labels, segm.labels)
+        invalid = np.setdiff1d(labels, seg.labels)
         if len(invalid):
             raise ValueError('Invalid labels %s' % invalid)
 
-        if adapt:
-            segm, labels = self.adapt_segments(segm, labels)
-
-        #
-        SegmentedImageModel.__init__(self, segm)
-
-        me = MedianEstimator()
-        me.dof = int(width)
-        self.add_model(me, labels)
-
-    def residuals(self, p, data, xy_offset):
-        x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
-        # modelled = self(p, gx2)
-
-        # if we have a masked image, unmask here to get residuals of full image
-        for m, xs in zip(p, x_slices):
-            data[..., xs] -= m
-        return data
-
-    def set_segments(self, segm, adapt=False, labels=None,
-                     width=PHOTON_BLEED_WIDTH):
-        if not isinstance(segm, SegmentationGridHelper):
-            segm = SegmentationGridHelper(segm)
+        if width is None:
+            width = get_x_width(seg, labels)
 
         if adapt:
-            segm, labels = self.adapt_segments(segm, labels, self.centres,
-                                               width, copy=True)
-        # set segmentation
-        self.segm = segm
-        # set mask
-        self.masks = ~np.array(list(segm.coslice(segm.to_bool())))
-        # set grid
-        # self.set_centres(self.centres)
+            _, labels = self.adapt_segments(seg, labels, None, width,
+                                            label_insert)
 
-    # def set_centres(self, loc):
-    #     x = np.array(loc)[:, None, None]
+        if models is None:
+            # create child models: default model is `MedianEstimator`
+            models = self._init_children(seg, labels)
+            models = dict(zip(labels, models))
+
+        # init parent
+        SegmentedImageModel.__init__(self, seg, models)
+
+        # tag label group
+        self.groups[self.name] = labels
+
+    def _init_children(self, seg, labels, *args):
+        # MedianEstimator
+        return (MedianEstimator(get_x_width(seg, labels)), ) * len(labels)
+
+    # def residuals(self, p, data, xy_offset):
+    #     x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
+    #     # modelled = self(p, gx2)
+    #
+    #     # if we have a masked image, unmask here to get residuals of full image
+    #     for m, xs in zip(p, x_slices):
+    #         data[..., xs] -= m
+    #     return data
+
+    # def set_segments(self, segm, adapt=False, labels=None,
+    #                  width=PHOTON_BLEED_WIDTH):
+    #     if not isinstance(segm, SegmentationGridHelper):
+    #         segm = SegmentationGridHelper(segm)
+    #
+    #     if adapt:
+    #         segm, labels = self.adapt_segments(segm, labels, self.centres,
+    #                                            width, copy=True)
+    #     # set segmentation
+    #     self.segm = segm
+    #
+    #     # set mask
+    #     self.masks = ~np.array(list(segm.coslice(segm.to_bool())))
+    #     # set grid
+    #     # self.set_centres(self.centres)
+
+    # def set_centres(self, x):
+    #     x = np.array(x)[:, None, None]
     #     gx = np.array(list(self.segm.coord_grids.values()))[:, 1]
     #     self.gx2 = np.square(gx - x)
 
@@ -408,51 +360,51 @@ class PhotonBleed(SegmentedImageModel):
     #     data, _ = self._prepare_data(data, off)
     #     return np.ma.median(data, -2)
 
-    def pre_process(self, p0, data, grid=None, stddev=None, *args, **kws):
-        off = kws.pop('xy_offset')
-        data, gx2 = self._prepare_data(data, off)
-        return super().pre_process(p0, data, gx2, stddev, *args, **kws)
+    # def pre_process(self, p0, data, grid=None, stddev=None, *args, **kws):
+    #     off = kws.pop('xy_offset')
+    #     data, gx2 = self._prepare_data(data, off)
+    #     return super().pre_process(p0, data, gx2, stddev, *args, **kws)
 
-    def _prepare_data(self, data, xy_offset):
-        # get slices
-        yo, xo = xy_offset
-        x_slices = list(map(slice, *(self.ranges - xo)))
-        y_slice = slice(yo, yo + data.shape[-2])
-
-        # get grid
-        # gx2 = self.gx2[:, y_slice]
-
-        # get data
-        data = np.ma.array([data[..., _] for _ in x_slices])
-        # apply mask
-        ix = (slice(None),) + (None,) * (data.ndim - 3) + (y_slice,)
-        data.mask |= self.masks[ix]
-        return data  # , gx2
-
-    def reduce_image(self, image, p, xy_offset):
-        # data = self._prepare_data(image, xy_offset)
-        x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
-        # modelled = self(p, gx2)
-
-        # if we have a masked image, unmask here to get residuals of full image
-        image = np.ma.getdata(image)
-        for m, xs in zip(p, x_slices):
-            image[..., xs] -= m
-        return image
-
-    def reduce_image_stat(self, image, xy_offset, statistic=np.ma.median):
-        # get image sections to which model applies
-        data, _ = self._prepare_data(image, xy_offset)
-        x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
-
-        # compute stat
-        modelled = statistic(data, -2)
-
-        # if we have a masked image, unmask here to get residuals of full image
-        image = np.ma.getdata(image)
-        for m, xs in zip(modelled, x_slices):
-            image[..., xs] -= m
-        return image, modelled
+    # def _prepare_data(self, data, xy_offset):
+    #     # get slices
+    #     yo, xo = xy_offset
+    #     x_slices = list(map(slice, *(self.ranges - xo)))
+    #     y_slice = slice(yo, yo + data.shape[-2])
+    #
+    #     # get grid
+    #     # gx2 = self.gx2[:, y_slice]
+    #
+    #     # get data
+    #     data = np.ma.array([data[..., _] for _ in x_slices])
+    #     # apply mask
+    #     ix = (slice(None),) + (None,) * (data.ndim - 3) + (y_slice,)
+    #     data.mask |= self.masks[ix]
+    #     return data  # , gx2
+    #
+    # def reduce_image(self, image, p, xy_offset):
+    #     # data = self._prepare_data(image, xy_offset)
+    #     x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
+    #     # modelled = self(p, gx2)
+    #
+    #     # if we have a masked image, unmask here to get residuals of full image
+    #     image = np.ma.getdata(image)
+    #     for m, xs in zip(p, x_slices):
+    #         image[..., xs] -= m
+    #     return image
+    #
+    # def reduce_image_stat(self, image, xy_offset, statistic=np.ma.median):
+    #     # get image sections to which model applies
+    #     data, _ = self._prepare_data(image, xy_offset)
+    #     x_slices = list(map(slice, *(self.ranges - xy_offset[1])))
+    #
+    #     # compute stat
+    #     modelled = statistic(data, -2)
+    #
+    #     # if we have a masked image, unmask here to get residuals of full image
+    #     image = np.ma.getdata(image)
+    #     for m, xs in zip(modelled, x_slices):
+    #         image[..., xs] -= m
+    #     return image, modelled
 
     # def __init__(self, ):
 
@@ -465,13 +417,74 @@ class PhotonBleed(SegmentedImageModel):
     #
     # super().__init__(segm, models)
 
-    def plot_fit_results(self, fig, p, data, grid, std, modRes=50):
+    # def plot_fit_results(self, fig, p, data, grid, std, modRes=50):
+    #
+    #     ax1, ax2 = fig.axes
+    #
+    #     gm = np.linspace(*grid[[0, -1]], modRes)
+    #     dfit = self(p, gm)
+    #     lines_mdl, = ax1.plot(gm, dfit, 'r-', label='model')
 
-        ax1, ax2 = fig.axes
 
-        gm = np.linspace(*grid[[0, -1]], modRes)
-        dfit = self(p, gm)
-        lines_mdl, = ax1.plot(gm, dfit, 'r-', label='model')
+class GaussianPhotonBleed(PhotonBleed):
+    # at fixed x positions. amplitude for each position and common dispersion
+    # are free params
+
+    def __init__(self, seg, labels, models=(), adapt=False, width=None,
+                 label_insert=None):
+        # by default no models created in line below since models empty
+        super().__init__(seg, labels, models, adapt, width, label_insert)
+
+    def _init_children(self, seg, labels, *args):
+        x = seg.com(None, labels)[:, 1]
+        return tuple(map(Gaussian1D, x))
+
+
+
+    # @property  # lazy
+    # def x(self):
+    #     return self._x
+    #
+    # @x.setter
+    # def x(self, x):
+    #     self.set_x(x)
+    #
+    # def set_x(self, x):
+    #     x = np.asarray(x)
+    #     self.dx2 = np.square(np.array(grids) - x)
+    #     self._x = x
+    #
+    # def update_grids(self, grids):
+    #     self.dx2 = np.square(np.array(grids) - self.x)
+    #
+    # def get_slice(self, offset):
+    #     return list(map(slice, *(self.ranges + offset)))
+    #
+    # def rss(self, p, data, grid=None):
+    #     self.rs(p, data, grid)
+    #
+    # def __call__(self, p):
+    #     # free params
+    #     *z0, a = p
+    #     return z0 * np.array(list(map(np.exp, -a * self.dx2)))
+
+        # return gauss1d(p, grid)
+
+    # def p0guess(self, data, grid, std=None):
+    #     bg = data[[0, -1]].mean()
+    #     data_bg = data - bg
+    #     imx = data_bg.argmax()
+    #     z0 = data_bg[imx]
+    #     x0 = grid[imx]  # .data
+    #     # print('p0', (x0, z0, 1))
+    #     return (x0, z0, 1)
+    #
+    # def fit(self, data, grid, stddev=None, p0=None, **kws):
+    #     # print(Gaussian1D)
+    #     # print(grid)
+    #     bounds = [(grid.min(), grid.max()), (0, 1e6), (0, 1e2)]
+    #     # TODO:  include in staticGridMixin?
+    #     return Model.fit(self, data, grid, stddev, p0, bounds=bounds, **kws)
 
 
 def spline_order_search1(cls, image, channel, report=None, **kws):
@@ -514,7 +527,7 @@ def spline_order_search1(cls, image, channel, report=None, **kws):
 from .spline2d import Spline2DImage
 
 
-class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
+class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,  # PhotonBleed,
                             SourceDetectionMixin):
 
     def __init__(self, orders, knots, smooth=True, continuous=True,
@@ -522,21 +535,27 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         Spline2DImage.__init__(self, orders, knots, smooth, continuous, primary)
         SegmentedImageModel.__init__(self, self.get_segmented_image(),
                                      list(self.models))
+        self.groups[self.__class__.__name__] = self.seg.labels
 
     @classmethod
     def from_image(cls, image, channel, orders,
-                   photon_bleed_threshold=PHOTON_BLEED_THRESH,
-                   photon_bleed_width=PHOTON_BLEED_WIDTH,
+                   photon_bleed_threshold=None,
+                   photon_bleed_width=None,
                    plot=False, detect_sources=True,
                    **detect_opts):
-        #
         """
-        Construct a instance from an image and polynomial multi-order.
+        Construct a instance from an `image` array for `channel`
+        given spline multi-order tuples.
+
         Position of the knots will be estimated using the `guess_knots` method.
 
         Sources in the image will be identified using `detection`
         algorithm.  Segments for detected sources will be added to the
         segmented image.
+
+        Photon bleed models will automatically be added to the model for
+        bright sources in the image based on `photon_bleed_threshold` and
+        `photon_bleed_width`
 
         Parameters
         ----------
@@ -560,23 +579,29 @@ class SlotModeBackground_V2(Spline2DImage, SegmentedImageModel,
         seg, groups, info, result, residual = cls.detect(image, detect_sources,
                                                          **detect_opts)
 
+        # add photon bleed regions
+        ph, seg, bright = PhotonBleed.from_image(image, seg,
+                                                 photon_bleed_threshold,
+                                                 photon_bleed_width)
+
         # run knot estimation
         knots = cls.guess_knots(seg.mask_sources(image), channel, plot=plot)
 
         # initialize
         mdl = cls(orders, knots)
-
-        # add photon bleed regions
-        ph, seg, bright = PhotonBleed.from_image(
-                image, seg, photon_bleed_threshold, photon_bleed_width)
+        n_models = len(mdl.models)
 
         # source label groups
-        groups = dict(zip(map(str, info), groups))
-        groups['bright'] = bright
+        # TODO: manage groups in segm.add_segments to avoid all this crap below
+        mdl.groups.update(dict(zip(map(str, info), np.add(groups, n_models))))
+        mdl.groups['PhotonBleed'] = ph.groups['PhotonBleed'] + n_models
+        mdl.groups['bright'] = bright + n_models
 
         # add detected sources
-        mdl.segm.add_segments(seg)
-        mdl.groups.update(groups)
+        mdl.seg.add_segments(seg)
+
+        # add photon bleed models
+        # mdl.models.update(zip(mdl.groups['PhotonBleed'], ph.models))
         return mdl
 
     @staticmethod
@@ -855,7 +880,7 @@ class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
         if detection not in (None, False):
             seg = detection(image, False, None, **detect_opts)
         else:
-            seg = mdl.segm
+            seg = mdl.seg
 
         return mdl, seg
 
@@ -976,7 +1001,7 @@ class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
 
     def detect(self, image, mask=False, background=None, snr=3., npixels=7,
                edge_cutoff=None, deblend=False, dilate=0,
-               flux_thresh_ft_bleed=PHOTON_BLEED_THRESH):
+               flux_thresh_ft_bleed=PHOTON_BLEED_COUNT):
         """
         Run detection, add labels, add group
 
@@ -997,12 +1022,12 @@ class SlotModeBackground(Spline2D):  # TODO Maybe SlotModeImageModel  ??
 
         """
         # detect stars
-        new_seg = self.segm.detect(image, mask, background, snr, npixels,
+        new_seg = self.seg.detect(image, mask, background, snr, npixels,
                                    edge_cutoff, deblend, dilate)
 
         if new_seg.data.any():
             # aggregate
-            _, new_labels = self.segm.add_segments(new_seg)
+            _, new_labels = self.seg.add_segments(new_seg)
 
             # group info
             self.groups.append(new_labels)

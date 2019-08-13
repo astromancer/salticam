@@ -28,7 +28,7 @@ from recipes.language import unicode
 from recipes import pprint
 from obstools.modelling.core import RescaleInternal
 from obstools.modelling.parameters import Parameters
-from obstools.modelling import StaticGridMixin, Model, CompoundModel
+from obstools.modelling import FixedGrid, Model, CompoundModel
 
 
 # UPPER_LEFT = u'\u250c'
@@ -1193,7 +1193,7 @@ class PiecewiseLinear(PiecewisePolynomial):
                          coeff_name_base)
 
 
-class PPolyModel(StaticGridMixin, PiecewisePolynomial, RescaleInternal, Model):
+class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
 
     # TODO Spline1D / NonUniform1dSpline
 
@@ -1316,8 +1316,8 @@ class PPolyModel(StaticGridMixin, PiecewisePolynomial, RescaleInternal, Model):
         return p0.flattened
 
     def set_grid(self, data):
-        self.static_grid = np.arange(len(data), dtype=float) / self._xscale
-        return self.static_grid
+        self._grid = np.arange(len(data), dtype=float) / self._xscale
+        # return self.grid
 
     def inverse_transform(self, p):
         if self.fit_breakpoints:
@@ -1949,7 +1949,7 @@ class _PPolyModel2D(PPolyModel):
         return A
 
 
-class PPoly2dOuter(StaticGridMixin, CompoundModel):  # RescaleInternal
+class PPoly2dOuter(FixedGrid, CompoundModel):  # RescaleInternal
     """
     Two-dimensional polynomial object with no mixed coefficient terms. Such
     polynomials can be expressed as a (outer) sum of 1D polynomials in x and y.
@@ -2029,7 +2029,7 @@ class PPoly2dOuter(StaticGridMixin, CompoundModel):  # RescaleInternal
             self.x.coeff_name_base = 'u'
 
     def __call__(self, p, grid=None):
-        if grid is None:  # todo delegate to StaticGridMixin
+        if grid is None:  # todo delegate to FixedGrid
             grid = self.static_grid
 
         if isinstance(p, Parameters):
@@ -2170,10 +2170,10 @@ class PPoly2dOuter(StaticGridMixin, CompoundModel):  # RescaleInternal
 
 def _check_order(o, ndim):
     assert len(o) == ndim, 'Order tuple has incorrect number of items. ' \
-                           f'Expected {ndim}, received {len(o)}'
+        f'Expected {ndim}, received {len(o)}'
 
 
-class Poly2D(Model, StaticGridMixin):
+class Poly2D(FixedGrid, Model):
     """Fittable 2d polynomial"""
 
     def __init__(self, multi_order):
@@ -2192,9 +2192,9 @@ class Poly2D(Model, StaticGridMixin):
         self._yixj = None
         # self.fit_variance = False
 
-    def __call__(self, p, grid=None):
-        grid = self._check_grid(grid)
-        return self.eval(p, grid)
+    # def __call__(self, p, grid=None):
+    #     grid = self._check_grid(grid)
+    #     return self.eval(p, grid)
 
     def eval(self, p, grid):
         self.set_coeff(p)  # coefficients increasing in power (y, x)
@@ -2227,7 +2227,7 @@ class Poly2D(Model, StaticGridMixin):
         self.free = np.ones(self.n_coeff, bool)
 
     def set_grid(self, grid):
-        self._static_grid = grid
+        FixedGrid.set_grid(self, grid)
         # grid-dependent yⁱxʲ terms used to calculate jacobian
         self._yixj = self.power_products(grid)  # TODO: lazy prop?
 
@@ -2666,7 +2666,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
     between polynomials.
     """
 
-    def __init__(self, orders, smooth=True, continuous=True):
+    def __init__(self, orders, domain, smooth=True, continuous=True):
         """
         Initialize with 2-tuple of polynomial multi-order.
 
@@ -2681,13 +2681,13 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         """
 
         # init parent
-        super().__init__(orders)
+        Poly2D.__init__(self, orders)
 
         # neighbours
         self.neighbours = PolyNeighbours()
         self.depends_on = None
-        self.domain = None
-        self._static_domain_mask = None
+        self.domain = np.array(domain)
+        # self._domain_mask = None
         # self.origin = 0 # np.array([[0], [0]])
         # self.scale = 1
 
@@ -2700,36 +2700,45 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         self.set_freedoms()
 
     def __call__(self, p, grid=None, out=None):
+
+        p = self._check_params(p)
+
         if grid is None:
             # get static grid if available.  Assume here internal grid is
             # already correct domain and form for `eval`.  Checks done inside
-            # `set_grid`
+            # `_check_grid`
             grid = self._check_grid(grid)
-            domain_mask = self._static_domain_mask
+            domain_mask = self._domain_mask
         else:
             # external grid provided.  Select domain
             grid, domain_mask = self.in_domain(grid)
             grid = self.domain_transform(grid)
-            # print('grid after transform', grid)
 
-        y = self.eval(p, grid)
+        y = self(p, grid)
 
         if out is not None:
             out[domain_mask] = y
         return y
 
     def set_grid(self, grid):
-        g, b = self.in_domain(grid)
-        super().set_grid(self.domain_transform(g))
-        self._static_domain_mask = b
+        # transform domain
+        g, self._domain_mask = self.in_domain(grid)
+        Poly2D.set_grid(self, self.domain_transform(g))
 
     def in_domain(self, grid):
+        # isolate points within the domain of this model from an arbitrary grid
+        # of points.  This function returns the domain mask as a tuple of
+        # slices so that the grid remains shaped
         if self.domain is None:
-            return grid
+            return grid, ...
 
         lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
         # noinspection PyUnresolvedReferences
         b = ((lo <= grid) & (grid <= hi)).all(0)
+        # by, bx = ((lo <= grid) & (grid <= hi))
+        # sy = slice(*(np.nonzero(by.any(1))[0][[0, -1]] + (0, 1)))
+        # sx = slice(*(np.nonzero(bx.any(0))[0][[0, -1]] + (0, 1)))
+        # b = (sy, sx)
         return grid[:, b], b
 
     def set_coeff(self, p):
