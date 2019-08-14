@@ -2711,7 +2711,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
             domain_mask = self._domain_mask
         else:
             # external grid provided.  Select domain
-            grid, domain_mask = self.in_domain(grid)
+            grid, domain_mask = self.get_domain_mask(grid)
             grid = self.domain_transform(grid)
 
         y = self(p, grid)
@@ -2722,24 +2722,37 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
     def set_grid(self, grid):
         # transform domain
-        g, self._domain_mask = self.in_domain(grid)
-        Poly2D.set_grid(self, self.domain_transform(g))
+        self._domain_mask = m = self.get_domain_slice(grid)
+        Poly2D.set_grid(self, self.domain_transform(grid[:, m]))
 
-    def in_domain(self, grid):
+    def get_domain_mask(self, grid):
         # isolate points within the domain of this model from an arbitrary grid
         # of points.  This function returns the domain mask as a tuple of
         # slices so that the grid remains shaped
         if self.domain is None:
-            return grid, ...
+            return ...
 
         lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
         # noinspection PyUnresolvedReferences
-        b = ((lo <= grid) & (grid <= hi)).all(0)
-        # by, bx = ((lo <= grid) & (grid <= hi))
-        # sy = slice(*(np.nonzero(by.any(1))[0][[0, -1]] + (0, 1)))
-        # sx = slice(*(np.nonzero(bx.any(0))[0][[0, -1]] + (0, 1)))
-        # b = (sy, sx)
-        return grid[:, b], b
+        return ((lo <= grid) & (grid <= hi)).all(0)
+
+    def get_domain_slice(self, grid):
+        """
+        For an arbitrary ordered grid, select the rectangular sub-region for
+        which the function is defined. Return the tuple of slice objects that
+        can be used to get the associated grid points
+        """
+
+        if self.domain is None:
+            return ...
+
+        lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+        b = ((lo <= grid) & (grid <= hi))
+        # fixme, if you know the grid is uniform and sorted this can be done
+        #  faster
+        return (...,) + tuple(
+                slice(*(np.nonzero(b[i].any(int(not i)))[0][[0, -1]] + (0, 1)))
+                for i in (0, 1))
 
     def set_coeff(self, p):
         super().set_coeff(p)
