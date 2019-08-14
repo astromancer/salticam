@@ -2723,7 +2723,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
     def set_grid(self, grid):
         # transform domain
         self._domain_mask = m = self.get_domain_slice(grid)
-        Poly2D.set_grid(self, self.domain_transform(grid[:, m]))
+        Poly2D.set_grid(self, self.domain_transform(grid[m]))
 
     def get_domain_mask(self, grid):
         # isolate points within the domain of this model from an arbitrary grid
@@ -2751,7 +2751,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         # fixme, if you know the grid is uniform and sorted this can be done
         #  faster
         return (...,) + tuple(
-                slice(*(np.nonzero(b[i].any(int(not i)))[0][[0, -1]] + (0, 1)))
+                slice(*(np.nonzero(b[i].any(int(not i)))[0][[0, -1]]))
                 for i in (0, 1))
 
     def set_coeff(self, p):
