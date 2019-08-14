@@ -2739,7 +2739,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
         sem = [['bottom', 'top'], ['left', 'right']]
         ops = (op.lt, op.le)
-        for i, (yx, (lo, hi)) in enumerate(zip(grid, self.domain.T)):
+        for i, (yx, (lo, hi)) in enumerate(zip(grid, self.domain)):
             op1, op2 = (ops[bool(self.neighbours.get(key))] for key in sem[i])
             m = op1(lo, yx) & op2(yx, hi)
             yield m
