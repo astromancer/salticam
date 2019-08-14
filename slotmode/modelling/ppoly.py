@@ -2725,14 +2725,8 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         self._domain_mask = m = self.get_domain_slice(grid)
         Poly2D.set_grid(self, self.domain_transform(grid[m]))
 
-    def get_domain_mask(self, grid):
-        # isolate points within the domain of this model from an arbitrary grid
-        # of points.  This function returns the domain mask as a tuple of
-        # slices so that the grid remains shaped
-        if self.domain is None:
-            return ...
-
-        lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+    def _gen_domain_mask(self, grid):
+        # for each dimension in grid, yield domain mask
 
         # The operators used below to check which points fall within the
         # domain of the function depend on the position of the polynomial.
@@ -2745,15 +2739,22 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
         sem = [['bottom', 'top'], ['left', 'right']]
         ops = (op.lt, op.le)
-        # y, x = grid
-        m = False
         for i, (yx, (lo, hi)) in enumerate(zip(grid, self.domain.T)):
-            # (ylo, yhi), (xlo, xhi) = self.domain.T
-            op1, op2 = (ops[bool(self.neighbours[key])] for key in sem[i])
-            # op1 = op.lt if self.neighbours.lower else op.le
-            # op2 = op.lt if self.neighbours.upper else op.le
-            m |= op1(lo, yx) & op2(yx, hi)
-        return m
+            op1, op2 = (ops[bool(self.neighbours.get(key))] for key in sem[i])
+            m = op1(lo, yx) & op2(yx, hi)
+            yield m
+
+    def get_domain_mask(self, grid):
+        # isolate points within the domain of this model from an arbitrary grid
+        # of points.  This function returns the domain mask as a tuple of
+        # slices so that the grid remains shaped
+        if self.domain is None:
+            return ...
+
+        # lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+        return np.all(list(self._gen_domain_mask(grid)), 0)
+
+        # return m
         # noinspection PyUnresolvedReferences
         # return ((lo <= grid) & (grid <= hi)).all(0)
 
@@ -2767,13 +2768,29 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         if self.domain is None:
             return ...
 
-        lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
-        b = ((lo <= grid) & (grid <= hi))
+        # lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+        # b = ((lo <= grid) & (grid <= hi))
+        # b = list()
         # fixme, if you know the grid is uniform and sorted this can be done
         #  faster
-        return (...,) + tuple(
-                slice(*(np.nonzero(b[i].any(int(not i)))[0][[0, -1]]))
-                for i in (0, 1))
+        try:
+            return (...,) + tuple(
+                    slice(*(np.nonzero(b.any(int(not i)))[0][[0, -1]]))
+                    for i, b in enumerate(self._gen_domain_mask(grid)))
+        except Exception as err:
+            from IPython import embed
+            import traceback
+            import textwrap
+            embed(header=textwrap.dedent(
+                """\
+                Caught the following %s:
+                ------ Traceback ------
+                %s
+                -----------------------
+                Exception will be re-raised upon exiting this embedded interpreter.
+                """) % (err.__class__.__name__, traceback.format_exc()))
+            raise
+
 
     def set_coeff(self, p):
         super().set_coeff(p)
