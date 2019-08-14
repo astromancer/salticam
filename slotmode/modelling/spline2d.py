@@ -984,15 +984,15 @@ class Spline2D_v2(CompoundModel):
 
 class Spline2DImage(Spline2D_v2):
 
-    def __init__(self, orders, knots, smooth=True, continuous=True,
-                 primary=None):
-        super().__init__(orders, knots, smooth, continuous, primary)
-
-        # create grid based on extremal knots
-        grid = np.indices(self.get_shape())
-        for poly in self.models:
-            # set static grid and static domain mask
-            poly.set_grid(grid)
+    # def __init__(self, orders, knots, smooth=True, continuous=True,
+    #              primary=None):
+    #     super().__init__(orders, knots, smooth, continuous, primary)
+    #
+    #     # create grid based on extremal knots
+    #     grid = np.indices(self.get_shape())
+    #     for poly in self.models:
+    #         # set static grid and static domain mask
+    #         poly.set_grid(grid)
 
     def __call__(self, p, grid=None):
 

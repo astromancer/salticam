@@ -2733,8 +2733,29 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
             return ...
 
         lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+
+        # The operators used below to check which points fall within the
+        # domain of the function depend on the position of the polynomial.
+        # The Convention used here is that models are defined on the interval
+        # that is closed at the bottom and open at the top, except for the
+        # top-most polys which have domain on closed y interval and right-most
+        # polys which have domain on closed x interval
+
+        import operator as op
+
+        sem = [['bottom', 'top'], ['left', 'right']]
+        ops = (op.lt, op.le)
+        # y, x = grid
+        m = False
+        for i, (yx, (lo, hi)) in enumerate(zip(grid, self.domain.T)):
+            # (ylo, yhi), (xlo, xhi) = self.domain.T
+            op1, op2 = (ops[bool(self.neighbours[key])] for key in sem[i])
+            # op1 = op.lt if self.neighbours.lower else op.le
+            # op2 = op.lt if self.neighbours.upper else op.le
+            m |= op1(lo, yx) & op2(yx, hi)
+        return m
         # noinspection PyUnresolvedReferences
-        return ((lo <= grid) & (grid <= hi)).all(0)
+        # return ((lo <= grid) & (grid <= hi)).all(0)
 
     def get_domain_slice(self, grid):
         """
