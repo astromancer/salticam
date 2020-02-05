@@ -201,44 +201,9 @@ def neighbourhood_median(cube, mask, nframes=1000, connectivity=2):
 # from motley import profiler
 #
 # @profiler.histogram()
-def make_flat(cube, mask, use=None):
-    """
-    Construct flat field for SLOTMODE data from on-sky images
-
-    Parameters
-    ----------
-    cube
-    mask
-
-    Returns
-    -------
-
-    """
-    # TODO: SPEED UP!!
-
-    from scipy import ndimage
-
-    if use is None:
-        # select a 1000 frames randomly throughout cube
-        n = max(len(cube), 1000)
-        use = np.random.randint(0, len(cube), n)
-
-    struct = np.ones((3, 3))
-    flat = np.ones(cube.shape[1:])
-    for yi, xi in zip(*np.where(mask)):
-        # for each pixel in the mask, get the (non-masked) neighbours
-        z = np.zeros_like(mask)
-        # there are probably far more efficient ways
-        z[yi, xi] = True
-        neighbours = ndimage.binary_dilation(z, struct) & ~mask
-        # ratio of neighbourhood median to pixel median
-        f = np.median(cube[use, z] / np.median(cube[use][:, neighbours], 1))
-
-        flat[yi, xi] = f
-    return flat
 
 
-from scipy import ndimage
+# from scipy import ndimage
 
 # def make_flat(cube):
 #     from scipy import ndimage

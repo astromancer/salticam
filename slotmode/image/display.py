@@ -1,6 +1,14 @@
 import matplotlib.pyplot as plt
 
 
+# from graphing.imagine import VideoDisplay
+
+
+# class SlotViewer(VideoDisplay):
+
+# def
+
+
 def display_slot_image(image_stack, channels=()):
     """
     Image of the slot across all 4 amplifier channels
