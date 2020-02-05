@@ -1,21 +1,16 @@
-from . import CHANNEL_SIZE_ARCMIN
-from .extract import parse_header
-
 import numpy as np
-from astropy.io.fits.header import Header
-from astropy.io.fits.hdu import PrimaryHDU
-from astropy.io.fits.hdu import register_hdu
-from obstools.phot.utils import ImageSamplerHDUMixin
+
+from obstools.phot.campaign import HDUExtra
 from recipes.logging import LoggingMixin
 
 
-class SaltiCamHDU(PrimaryHDU, ImageSamplerHDUMixin, LoggingMixin):
+class SaltiCamHDU(HDUExtra, LoggingMixin):
     def __init__(self, data=None, header=None, do_not_scale_image_data=False,
                  ignore_blank=False, uint=True, scale_back=None):
         super().__init__(data, header, do_not_scale_image_data, ignore_blank,
                          uint, scale_back)
 
-        # TODO: Mixin class that converts header info to attributes?
+        # TODO: Mixin class / method that converts header info to attributes?
         # add some attributes for convenience
         self.telescope = 'SALT'
         self.target = header.get('OBJECT')
@@ -26,6 +21,7 @@ class SaltiCamHDU(PrimaryHDU, ImageSamplerHDUMixin, LoggingMixin):
         return header.get('INSTRUME') == 'SALTICAM'
 
     def get_fov(self):
+        from salticam.slotmode import CHANNEL_SIZE_ARCMIN
         return CHANNEL_SIZE_ARCMIN  # yx
 
     def get_rotation(self):
@@ -33,7 +29,7 @@ class SaltiCamHDU(PrimaryHDU, ImageSamplerHDUMixin, LoggingMixin):
         return np.radians(self.header['telpa'])
 
     def get_coords(self):
-        from pySHOC.utils import retrieve_coords, convert_skycoords
+        from pySHOC.utils import get_coords_named, convert_skycoords
 
         header = self.header
         ra, dec = header.get('ra'), header.get('dec')
@@ -42,24 +38,20 @@ class SaltiCamHDU(PrimaryHDU, ImageSamplerHDUMixin, LoggingMixin):
             return coords
 
         if self.target:
-            # from pySHOC.utils import retrieve_skycoords
-
             # No / bad coordinates in header, but object name available - try
             # resolve
-            coords = retrieve_coords(self.target)
+            coords = get_coords_named(self.target)
 
         if coords:
             return coords
 
         # No header coordinates / Name resolve failed / No object name available
-        # LAST resort use TELRA, TELDEC. This will only work for newer SHOC
-        # data for which these keywords are available in the header
-        # note: These will lead to slightly less accurate timing solutions,
-        #  so emit warning
+        # LAST resort use TELRA, TELDEC.
         ra, dec = header.get('telra'), header.get('teldec')
         coords = convert_skycoords(ra, dec)
 
-        # TODO: optionally query for named sources in this location
+        # TODO: maybe optionally query for named sources in this location and
+        #  list them
         if coords:
             self.logger.warning('Using telescope pointing coordinates. This '
                                 'may lead to barycentric timing correction / '
@@ -70,24 +62,41 @@ class SaltiCamHDU(PrimaryHDU, ImageSamplerHDUMixin, LoggingMixin):
     # def get_telescope(self):
     #     return 'SALT'
 
+    # # plotting
+    # def display(self, **kws):
+    #     """Display the data"""
+    #     n_dim = len(self.shape)
+    #     if n_dim == 2:
+    #         from graphing.imagine import ImageDisplay
+    #         im = ImageDisplay(self.data, **kws)
+    #
+    #     elif n_dim == 3:
+    #         from graphing.imagine import VideoDisplay
+    #         # FIXME: this will load entire data array which might be a tarpit
+    #         #  trap
+    #         im = VideoDisplay(self.section, **kws)
+    #
+    #     else:
+    #         raise TypeError('Data is not image or video.')
+    #
+    #     im.figure.canvas.set_window_title(self.filepath.name)
+    #     return im
 
-register_hdu(SaltiCamHDU)
 
-
-class SaltiCamObservation(object):
-    # emulate pySHOC.shocObs
-
-    @classmethod
-    def load(cls, filename, **kws):
-        return cls(filename)
-
-    def __init__(self, filename):
-        self._filename = str(filename)
-        self.data = np.lib.format.open_memmap(filename)[:, 1]  # HACK!!
-
-        filename0 = next(filename.parent.glob('*.fits'))
-        header0_bytes, header1_bytes = parse_header(filename0)
-        self.header = Header.fromstring(header0_bytes)
-
-    def filename(self):
-        return self._filename
+# class SaltiCamObservation(object):
+#     # emulate pySHOC.shocObs
+#
+#     @classmethod
+#     def load(cls, filename, **kws):
+#         return cls(filename)
+#
+#     def __init__(self, filename):
+#         self._filename = str(filename)
+#         self.data = np.lib.format.open_memmap(filename)[:, 1]  # HACK!!
+#
+#         filename0 = next(filename.parent.glob('*.fits'))
+#         header0_bytes, header1_bytes = parse_header(filename0)
+#         self.header = Header.fromstring(header0_bytes)
+#
+#     def filename(self):
+#         return self._filename
