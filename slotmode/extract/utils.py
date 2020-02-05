@@ -1,10 +1,15 @@
 import re
 from pathlib import Path
+import logging
 
 import numpy as np
+from recipes.introspection.utils import get_module_name
+
+# module level logger
+logger = logging.getLogger(get_module_name(__file__))
 
 # Template for patterns matching FITS header keys
-TEMPLATE_PATTERN_HEADER_KEYS = """
+TEMPLATE_PATTERN_HEADER_KEYS = r"""
     (%s%s)          # keywords (non-capture group if `capture_keywords` False)
     \s*?=\s+        # (optional) whitespace surrounding value indicator '='
     '?([^'\s/]*)'?  # value associated with any of the keys (un-quoted)
@@ -30,8 +35,8 @@ def regex_maker(keys, capture_keywords=True, encode=True, compile=True,
     `_sre.SRE_Pattern`
     """
 
-    if keys is None:
-        return _NullMatcher()
+    if keys is None or (len(keys) == 0):
+        return  # _NullMatcher()
 
     if isinstance(keys, (str, bytes)):
         keys = keys,
@@ -55,7 +60,7 @@ def regex_maker(keys, capture_keywords=True, encode=True, compile=True,
     return regex
 
 
-def prepare_path(name, folder):
+def prepare_path(name, folder, overwrite):
     path = Path(name)
     if path.parent == Path():
         # `name` is intended as a filename str not a path - make relative to
@@ -65,6 +70,13 @@ def prepare_path(name, folder):
 
     if not path.parent.exists():
         path.parent.mkdir(parents=True)
+    if path.exists:
+        if overwrite:
+            logger.info('The file %r will be overwritten', path)
+        else:
+            raise IOError('Operation will overwrite the file %r. To avoid this '
+                          'error pass the argument `overwrite=False`'
+                          % str(path))
 
     return path
 

@@ -13,13 +13,13 @@ overhead.
 
 import io
 import os
-import re, sys
+import re
 import mmap
 import logging
-from motley.progress import move_cursor
+
 from pathlib import Path
-from IPython import embed
 import multiprocessing as mp
+
 # scientific libs
 import numpy as np
 from numpy.lib.format import open_memmap
@@ -31,15 +31,15 @@ from astropy.io.fits.header import BLOCK_SIZE
 
 # local libs
 import motley
-from recipes.io import parse
 from recipes.logging import LoggingMixin, all_logging_disabled
 from recipes import pprint
 from recipes.decor.memoize import memoize
 
 # profiling & decorators
-from motley.profiler.timers import timer
+from motley.profiling.timers import timer
 
-from .. import N_CHANNELS, ALL_CHANNELS, _pprint_header, _check_channels
+from .. import N_CHANNELS, ALL_CHANNELS, check_channels
+from ..header import _pprint_header
 from .utils import regex_maker, prepare_path, truncate_memmap
 
 from recipes.introspection.utils import get_module_name
@@ -53,14 +53,14 @@ try:
     # use tqdm progress bar ftw!
 except ImportError:
     # null object pattern for progressbar
-    # FIXME: null object here
+    # FIXME: null object here else fail with multiprocessing and no tqdm ...
     '''def tqdm(*args, **kwargs):
         if args:
             return args[0]
         return kwargs.get('iterable', None)'''
 
+# proxy for tqdm progressbar
 SyncManager.register("tqdm", tqdm, exposed=('update', 'display', 'close'))
-
 manager = SyncManager()
 manager.start()
 
@@ -69,7 +69,7 @@ logger = logging.getLogger(get_module_name(__file__))
 
 # Regex pattern matcher for identifying header blocks
 SRE_END = re.compile(rb'END {77}\s*')
-SRE_NAXIS = regex_maker('naxis(\d)')
+SRE_NAXIS = regex_maker(r'naxis(\d)')
 SRE_BITPIX = regex_maker('bitpix', capture_keywords=False)
 SRE_NEXTEND = regex_maker('nextend', capture_keywords=False)
 SRE_DATASEC = regex_maker('datasec')
@@ -81,9 +81,6 @@ SRE_FILENAME = re.compile(r"""
                     (?P<date>(?P<year>20\d\d)(?P<month>[01]\d)(?P<day>[0-3]\d))
                     (?P<nr>[0-9]{4}).fits""",
                           re.VERBOSE)
-# trigger for white noise frame detection to determine proper start of image
-# data
-DETECT_START = type('trigger', (), {})
 
 ex_doc_template = \
     """
@@ -107,10 +104,10 @@ def parse_header(filename, return_map=False):
     """
     Extract primary header and first extension header.
     """
-    filesize = os.path.getsize(filename)
-    with open(filename, 'rb') as fileobj:
+    file_size = os.path.getsize(filename)
+    with open(filename, 'rb') as file_obj:
         mm = mmap.mmap(
-                fileobj.fileno(), filesize, access=mmap.ACCESS_READ
+                file_obj.fileno(), file_size, access=mmap.ACCESS_READ
         )
 
     # Find the index position of the first extension and data start
@@ -135,22 +132,27 @@ def get_indexing_info(header0, header1):
     ext_head_size = len(header1)
     ext_data_start = ext_head_size + len(header0)
     n_ext = get_nextend_re(header0)  # nr of fits extensions
-    bitpix = int(_get_card(SRE_BITPIX, header0))
+    # NB NB!! Get BITPIX value from the first extension header not main header!
+    bitpix = int(_get_card(SRE_BITPIX, header1))
     # image dimensions: order of axes on an numpy array are opposite of
     # that of the FITS file.
-    return ext_data_start, ext_head_size, n_ext, bitpix, get_image_shape(
-            header1)
+    return (ext_data_start, ext_head_size, n_ext, bitpix,
+            get_image_shape(header1))
 
 
-def get_header_dtype(headers, header_keys, mm, max_depth=2):
+def get_header_dtype(headers, header_keys, mm, max_depth=3):
     dtype_dict, missing = check_header(headers[1], header_keys)
 
     if len(missing):
         # could not find all the requested header keys in the first
         # extension header. check the next extension. This will not
-        # happen very often
+        # happen very often.
         ex = _ExtractorBase.from_headers(*headers)
-        itr = ex._index_mapper(0, 0)
+        # generate indices starting from frame zero which might not be the
+        # same frame as the extraction will start from, but should be OK
+        # since we are only determining the dtype for the output header info
+        # array
+        itr = ex.gen_indices(0, 0, 0, 0)
         while len(missing):
             (k, l), byte_pos = next(itr)
             if k == max_depth:
@@ -172,10 +174,10 @@ def check_header(header, keys):
     # check that these keywords are all in the first extension header so
     # we don't fail in the parallel loop
     if (keys is None) or (len(keys) == 0):
-        return [], None
+        return {}, ()
     else:
         # convert to upper case
-        keys = [_.upper() for _ in keys]
+        keys = [_.upper() for _ in keys]  # list(map(str.upper, keys))
 
     # create regex matcher
     # if dealing with bytes, we have to encode the regex
@@ -235,6 +237,7 @@ def is_blank(image, pre_check_indices):
     Parameters
     ----------
     image
+    pre_check_indices
 
     Returns
     -------
@@ -281,16 +284,51 @@ def is_acquisition_image(mheader, ext1header):
 
         # # dsec = ext1header['datasec']
         # y_extent = int(dsec.strip('[]').split(',')[1].split(':')[1])
-        # return y_extent >= CHANNEL_SIZE_PIXELS[1]  # acquisition image!
+        # return y_extent >= CHANNEL_SIZE[1]  # acquisition image!
     return False
 
 
-import more_itertools as mit
+@memoize
+def get_mmap(filename):
+    # create memory map for input file
+    file_size = os.path.getsize(filename)
+    with open(filename, 'rb') as file_obj:
+        # since the image data is non-contiguous. Use `mmap.mmap` instead
+        # of `np.memmap`
+        return mmap.mmap(file_obj.fileno(), file_size,
+                         access=mmap.ACCESS_READ)
+
+
+def first_science_stack(file_list):
+    # The first image in the list may be an acquisition image, which we
+    # don't want to extract. Check whether this is an acquisition image
+    for i, filename in enumerate(file_list):
+        headers, mm = parse_header(filename, return_map=True)
+        if is_acquisition_image(*headers):
+            continue  # the next one should be the first science frame
+
+        # at this point we have the first science file
+        return i, Path(filename), headers, mm
+
+
+def get_date(filename):
+    """
+    Regex search for date in fits header of `filename`
+
+    Parameters
+    ----------
+    filename
+
+    Returns
+    -------
+
+    """
+    return SRE_FILENAME.search(Path(filename).name).group(2)
 
 
 class SlotModeExtract(LoggingMixin):
     """
-    High level object for SaltiCam slotmode image (video) extraction and
+    High level interface for SaltiCam slotmode image (video) extraction and
     conversion.
 
     Salticam data typically comes off the SALT pipeline in a list of
@@ -306,77 +344,67 @@ class SlotModeExtract(LoggingMixin):
     Typically output consists of 2 (memory mapped) arrays:
         The first contains the actual image data as a multidimensional array.
         The second contains the header keywords extracted from each image
-        extension
+        extension.
 
     Assuming all the files in the input list are fits compliant and have the
     same basic structure, data extraction can be done ~10**6 times faster
     than it can with pyfits (even without multiprocessing!!) by skipping
-    unnecessary checks and other boilerplate and mapping fits image data
-    directly into one big contiguous numpy array.
+    unnecessary checks etc and mapping fits image data directly into one big
+    contiguous numpy array.
     """
 
     outputFilenameTemplate = 's{date:s}'
     fileExtensionHeaderInfo = '.info'
 
-    def __init__(self, filelist, loc=None, header_keys=(), clobber=True):
+    def __init__(self, file_list, loc=None, header_keys=(), overwrite=True):
 
         # parse the input list
-        filelist = sorted(filelist)
-        # FIXME: loosing Path objects here .... Also remove print statements!
-        if not len(filelist):
+        file_list = sorted(file_list)
+        if not len(file_list):
             raise ValueError('Input file list is empty.')
 
-        self.logger.info('Received list of %i files.' % len(filelist))
+        # show files
+        self.logger.info('Received list of %i files.' % len(file_list))
 
-        # advance to first science stack
-        # The first image in the list may be an acquisition image, which we
-        # don't want to extract. Check whether this is an acquisition image
-        for i, filename in enumerate(filelist):
-            headers, mm = parse_header(filename, return_map=True)
-            if is_acquisition_image(*headers):
-                continue  # the next one should be the first science frame
+        # advance to first science observation
+        i, path0, headers, mm = first_science_stack(file_list)
 
-            # at this point we have the first science file
+        # keyword extraction setup
+        self.head_dtype, self.header_keys = get_header_dtype(
+                headers, header_keys, mm)
 
-            # keyword extraction setup
-            self.head_dtype, self.header_keys = get_header_dtype(
-                    headers, header_keys, mm)
-            break
-
-        #
-        #
         # key_matcher = regex_maker(header_keys)
-        logger.info('Values for %i keywords: %s to be extracted',
-                    len(self.head_dtype), tuple(self.header_keys))
+        if len(self.head_dtype):
+            logger.info('Values for %i keywords: %s to be extracted',
+                        len(self.head_dtype), tuple(self.header_keys))
+        else:
+            logger.info('No header keywords to be extracted')
 
-        self.filelist = filelist[i:]
-        self.clobber = clobber
+        # noinspection PyUnboundLocalVariable
+        self.file_list = file_list[i:]
+        self.overwrite = bool(overwrite)
 
         # create output folder if needed
-        path0 = Path(filename)
-        if loc is None:
-            loc = path0.parent
-        else:
-            loc = Path(loc)
-            if not loc.exists():
-                loc.mkdir(parents=True)
+        loc = path0.parent if loc is None else Path(loc)
 
         # output filename template
         self.loc = loc
-        self.date = SRE_FILENAME.search(path0.name).group(2)
+        self.date = get_date(path0)
         self.basename = \
             self.loc / self.outputFilenameTemplate.format(date=self.date)
 
         # need some info from header
+        # noinspection PyUnboundLocalVariable
         n_ext = get_nextend_re(headers[0])
         self.n_images_per_amp_file = n_ext // N_CHANNELS
         # self.headers = tuple(map(bytes.decode, headers))
         self.headers = headers
-        self.ishape = get_image_shape(headers[1])
+        self.image_shape = get_image_shape(headers[1])
+        self.ex = None  # placeholder for extraction class
 
     @property
     def n_files(self):
-        return len(self.filelist)
+        return len(self.file_list)
 
     @property
     def n_total_frames(self):
@@ -402,18 +430,7 @@ class SlotModeExtract(LoggingMixin):
         return np.vectorize(self._get_file_nr, 'i')(indices)
 
     def _get_file_nr(self, index):
-        return get_file_nr(self.filelist[index])
-
-    # def get_n_frames(self, start=0, stop=None):
-    #     # expected number of frames to extract (assuming all files have
-    #     # identical number of extensions)
-    #     n_tot = self.n_files * self.n_images_per_amp_file
-    #     if stop is None:
-    #         stop = n_tot
-    #     else:
-    #         assert start < stop
-    #         stop = max(n_tot, stop)
-    #     return stop - start
+        return get_file_nr(self.file_list[index])
 
     def get_shape(self, start, stop, channels):
         # get data dimensions
@@ -429,28 +446,14 @@ class SlotModeExtract(LoggingMixin):
             else:
                 # interpret as total number of frames to extract
                 n_frames = stop
-                try:
-                    stop += n_dud
-                except Exception as err:
-                    from IPython import embed
-                    import traceback
-                    import textwrap
-                    embed(header=textwrap.dedent(
-                        """\
-                        Caught the following %s:
-                        ------ Traceback ------
-                        %s
-                        -----------------------
-                        Exception will be re-raised upon exiting this embedded interpreter.
-                        """) % (err.__class__.__name__, traceback.format_exc()))
-                    raise
+                stop += n_dud
 
         else:
             stop = min(n_tot, stop or n_tot)
             n_frames = stop - start
 
         #
-        shape = (n_frames, len(channels)) + self.ishape
+        shape = (n_frames, len(channels)) + self.image_shape
         self.logger.info('Using subset: %s', (start, stop))
         return shape, start, stop, data_pre, info_pre
 
@@ -473,7 +476,6 @@ class SlotModeExtract(LoggingMixin):
         # is 10+ times larger
         std = np.std(data, (2, 3))
         n_dud = np.where(np.all((std / std[0]) > threshold, 1))[0][0]
-
         if n_dud:
             self.logger.info('Detected %i white noise frames at the start of '
                              'the image stack. Ignoring these.', n_dud)
@@ -495,15 +497,15 @@ class SlotModeExtract(LoggingMixin):
 
         # create memory map for extraction (4D)
         data = np.memmap(name, ex.dtype, 'w+', offset, shape)
-        # FIXME: w+ will always clobber, r+ fails on create
+        # FIXME: w+ will always overwrite, r+ fails on create
 
         # header info data
-        hdata = None
+        header_data = None
         if header_name:
             # read the extracted keys to structured memory map
-            hdata = open_memmap(str(header_name), 'w+', self.head_dtype,
-                                (n_frames, n_ch))
-        return data, header, hdata
+            header_data = open_memmap(str(header_name), 'w+', self.head_dtype,
+                                      (n_frames, n_ch))
+        return data, header, header_data
 
     def check_free_space(self, req_bytes_data, req_bytes_head=0):
         statvfs = os.statvfs(self.loc)
@@ -523,66 +525,124 @@ class SlotModeExtract(LoggingMixin):
 
     def run(self, ext, channels=ALL_CHANNELS, start=None, stop=None,
             data_file=None, head_file=None, clean=True, progress_bar=True):
-        #
-        cls = EXTRACTORS[ext]
-        channels = _check_channels(channels)
+        """
+        Main extraction routine.
 
+        Parameters
+        ----------
+        ext: str, {'fits', 'npy'}
+            file extension. Determines the type of output file.
+        channels: int or tuple of int
+            indices for channels to extract
+        start: int
+            requested starting frame index for extraction. If not given,
+            this will automatically pick the first useful image data (first
+            frame that is not just white noise)
+        stop: int
+            requested final frame index for extraction. If not given,
+            the last useful image frame will be used (that is not just all zero)
+        data_file:
+            output filename for data file. If not given, filename will
+            automatically be created according to the `basename` attribute
+            (which is created using `outputFilenameTemplate` class attribute)
+        head_file:
+            output filename for header info file. If not given, it will be
+            created using the `basename` attribute.
+        clean: bool
+            whether or not to run the cleanup routine post extraction.
+        progress_bar: bool
+            whether or not to display a progressbar during extraction.
+
+        Returns
+        -------
+
+        """
+        cls = EXTRACTORS[ext]
+        channels = check_channels(channels)
+
+        # init output files and folders
         if data_file is None:
             if len(channels) == 1:
                 # single channel extraction. put channel number in filename
                 data_file = self.basename.with_suffix(f'.ch{channels[0]}.{ext}')
             else:
                 data_file = self.basename.with_suffix(f'.{ext}')
-        data_file = prepare_path(data_file, self.loc)
+        data_file = prepare_path(data_file, self.loc, self.overwrite)
 
-        if head_file is None and len(self.header_keys):
+        # if no header file given, and header key extraction requested
+        if (head_file is None) and len(self.header_keys):
             head_file = self.basename.with_suffix(self.fileExtensionHeaderInfo)
-        head_file = prepare_path(head_file, self.loc)
+
+        # if no header keys provided at init, but filename given, ignore file
+        if len(self.header_keys) == 0:
+            head_file = None
+        else:
+            head_file = prepare_path(head_file, self.loc, self.overwrite)
 
         # init extractor
-        self.ex = ex = cls.from_headers(*self.headers, keys=self.header_keys)
+        self.ex = ex = cls.from_headers(*self.headers,
+                                        header_keys=self.header_keys)
 
-        #
+        # pre-run to detect noise frame and get final output shape
         detect_start = (start is None)
-        shape, start, stop, data_pre, info_pre = self.get_shape(
-                start, stop, channels)
+        shape, start, stop, data_pre, info_pre = self.get_shape(start, stop,
+                                                                channels)
+        # data_pre contains the first useful image frames only (ignoring
+        # white noise frames)
 
         # allocate memory
         data, header, info = self._init_mem(ex, data_file, shape, head_file)
 
+        # get frame offset for dud frame detections
         if detect_start:
-            n = len(data_pre)
-            data[:n] = data_pre
-            info[:n] = info_pre
-            dstart = n  # index data start
+            out_start = len(data_pre)  # index of starting frame for data
+            data[:out_start] = data_pre
+            info[:out_start] = info_pre
         else:
-            dstart = 0
+            out_start = 0
 
-        #
         # do the work! (write data)
         self.logger.info('Extracting data. This may take a few moments...')
-        data, info = ex.loop_mp(self.filelist, start, stop, dstart, data, info,
-                                channels, progress_bar)
+        data, info = ex.loop_mp(self.file_list, start, stop, out_start, data,
+                                info, channels, progress_bar)
 
         if clean:
             return self.cleanup(ex, data, header, info, channels)
 
         return data, header, info
 
-    # @timer  # FIXME: timer empty print statements fucking with tqdm
+    # @timer  # FIXME: timer empty print statements messing with tqdm
     def cleanup(self, ex, data, header, info, channels):
+        """
+        Cleanup the extracted data and header files by removing trailing
+        blank frames.
+
+        Parameters
+        ----------
+        ex
+        data
+        header
+        info
+        channels
+
+        Returns
+        -------
+
+        """
         self.logger.info('Extraction done. Cleaning up.')
 
         # some slot mode files are have all zeros at the end. Strip those
         # along with corresponding header entries
         ignore = np.zeros(len(data), bool)
         # check single column for all zeros to flag blank frames
-        check_col = (slice(None), ex.ishape[1] // 2)
+        check_col = (slice(None), ex.image_shape[1] // 2)
         for n_blank, image in enumerate(data[::-1, 0]):
             if not is_blank(image, check_col):
                 break
 
+        # noinspection PyUnboundLocalVariable
         if n_blank:
+            # noinspection PyUnboundLocalVariable
             self.logger.info('Detected %i blank images at the end of stack',
                              n_blank)
             n = len(data)
@@ -590,8 +650,8 @@ class SlotModeExtract(LoggingMixin):
 
         # Identify and remove bad frames at the end of run
         if 'DATE-OBS' in info.dtype.fields.keys():
-            utdate = info['DATE-OBS'][:, 0]
-            l1969 = (utdate == '1969-12-31')
+            ut_date = info['DATE-OBS'][:, 0]
+            l1969 = (ut_date == '1969-12-31')
             # The last ~50 frames have this date for some reason
             ignore[l1969] = True
 
@@ -604,8 +664,23 @@ class SlotModeExtract(LoggingMixin):
 
         return data, header, info
 
-    def cleanup_info(self, info, indices_remove):
+    def cleanup_info(self, info, indices_remove, write=True):
+        """
+        Cleanup extracted header info by removing duplicate (by channel) data
 
+        Parameters
+        ----------
+        info: memmap
+            structured array with header info
+        indices_remove: array-like of int
+            Trailing indices that will be removed from array
+        write: bool
+            whether to rewrite the file to disk after cleanup
+        Returns
+        -------
+
+        """
+        filename = info.filename
         if len(indices_remove):
             info = info[:-len(indices_remove)]
 
@@ -623,22 +698,31 @@ class SlotModeExtract(LoggingMixin):
                              'channels. Keeping header data as %iD.',
                              info.ndim)
 
-        # return header data as record array with lower case field titles for
-        # convenient access
+        # return header data as record array with lower case field titles
+        # with '-OBS' stripped for convenient access
+        # eg. info.utc gives info['UTC-OBS']
         new_dtype = np.dtype([((n.lower().strip('-obs'), n), v)
                               for n, v in self.head_dtype.descr])
 
+        if write:
+            # use file obj instead of str to avoid npy extension. might not
+            # be best policy??
+            with open(filename, 'wb') as fp:
+                np.save(fp, info)
+
         return np.rec.array(info, new_dtype)
 
-    def to_fits(self, channels=ALL_CHANNELS, start=DETECT_START, stop=None,
+    def to_fits(self, channels=ALL_CHANNELS, start=None, stop=None,
                 data_file=None, head_file=None, clean=True, progress_bar=True):
+        # don't put a docstring here
         return self.run('fits', channels, start, stop, data_file, head_file,
                         clean, progress_bar)
 
-    to_fits.__doc__ = ex_doc_template % 'FITS cube'
+    to_fits.__doc__ = ex_doc_template % 'FITS file'
 
-    def to_array(self, channels=ALL_CHANNELS, start=DETECT_START, stop=None,
+    def to_array(self, channels=ALL_CHANNELS, start=None, stop=None,
                  data_file=None, head_file=None, clean=True, progress_bar=True):
+        # don't put a docstring here
         return self.run('npy', channels, start, stop, data_file, head_file,
                         clean, progress_bar)
 
@@ -655,31 +739,42 @@ class SlotModeExtract(LoggingMixin):
 
 
 class _ExtractorBase(LoggingMixin):
+    """
+    Internal base class for extraction to FITS or npy
+    """
 
     @classmethod
-    def from_file(cls, filename, *args, **kws):
-        return cls(*parse_header(filename), *args, **kws)
+    def from_file(cls, filename, **kws):
+        return cls(*parse_header(filename), **kws)
 
     @classmethod
     def from_headers(cls, header0, header1, *args, **kws):
-        return cls(*get_indexing_info(header0, header1), *args, **kws)
+        return cls(*get_indexing_info(header0, header1), **kws)
 
     def __init__(self, data_start_bytes, ext_head_size, n_extensions,
-                 bits_per_pixel, image_shape):
+                 bits_per_pixel, image_shape, header_keys=None):
+        """
+
+        Parameters
+        ----------
+        data_start_bytes
+        ext_head_size
+        n_extensions
+        bits_per_pixel
+        image_shape
+        header_keys
+        """
         self.ext_start = int(data_start_bytes)
         self.ext_head_size = ext_head_size
         self.n_ext = n_extensions
         self.n_images_per_amp_file = self.n_ext // N_CHANNELS
-        self.ishape = rows, cols = image_shape
-        # HACK: seems like the SALT pipeline does not update BITPIX after
-        #  image corrections?
-        bits_per_pixel = -32
+        self.image_shape = rows, cols = image_shape
         self.image_size_bytes = abs(bits_per_pixel) * rows * cols // 8
         self.dtype = np.dtype(BITPIX2DTYPE[bits_per_pixel]).newbyteorder('>')
 
         # frame range
         # self.start = 0
-        self.idx_data_off = 0
+        # self.idx_data_off = 0
 
         # figure out the size of a data block:
         # NOTE: from here on outward we assume FITS compliance -- i.e. file
@@ -689,19 +784,34 @@ class _ExtractorBase(LoggingMixin):
                 (self.ext_head_size + self.image_size_bytes) / BLOCK_SIZE)
         self.ext_size = int(BLOCK_SIZE * n_blocks_per_ext)
 
-    def _index_mapper2(self, start, stop, channels, idx_data_start):
+        # finally make pattern matcher for parallel extraction (no keyword
+        # capture)
+        self.key_matcher = regex_maker(header_keys)
+
+        # progressbar placeholder
+        self.bar = None
+
+    def gen_indices(self, start, stop, channels, idx_data_start):
         """
+        Generate indices for output file frame number, channel number,
+        byte position for data
 
         Parameters
         ----------
-        i
-        start:  starting frame index relative to file
-        stop:  starting frame index relative to file
-        channels
+        start:  int
+            starting frame index relative to current file
+        stop:  int
+            stopping frame index relative to current file
+        channels: int or tuple of int
+            amplifier channels to use
+        idx_data_start: int
+            Starting frame index for output
 
-        Returns
-        -------
-
+        Yields
+        ------
+        frame index
+        channel index
+        byte position for start of image
         """
         # map indices from input file number to output (frame, channel, n_byte)
         # index
@@ -718,112 +828,155 @@ class _ExtractorBase(LoggingMixin):
                 ext_nr = ch + ext_offset
                 yield (k, l), self.ext_start + ext_nr * self.ext_size
 
-    def _file_pos(self, j, k):
-        ext_nr = k + (j % self.n_images_per_amp_file) * N_CHANNELS
-        return self.ext_start + ext_nr * self.ext_size
+    # def _file_pos(self, j, k):
+    #     ext_nr = k + (j % self.n_images_per_amp_file) * N_CHANNELS
+    #     return self.ext_start + ext_nr * self.ext_size
 
+    # class _Extract(_ExtractorBase):
+    #     def __init__(self, *args, keys):
+    #         super().__init__(*args)
 
-@memoize
-def get_mmap(filename):
-    # create memory map for input file
-    filesize = os.path.getsize(filename)
-    with open(filename, 'rb') as fileobj:
-        # since the image data is non-contiguous. Use `mmap.mmap` instead
-        # of `np.memmap`
-        return mmap.mmap(fileobj.fileno(), filesize,
-                         access=mmap.ACCESS_READ)
+    def iter_files(self, files, start, stop, out_start):
+        """
+        Generator that for each file in the sequence creates the indices
+        needed for the extraction of the data
 
+        Parameters
+        ----------
+        files
+        start
+        stop
+        out_start
 
-class _Extract(_ExtractorBase):
-    def __init__(self, *args, keys):
-        super().__init__(*args)
+        Yields
+        -------
+        file number
+        file name
+        start frame in file
+        stop frame in file
+        starting index in output for current file
 
-        # finally make pattern matcher for parallel extraction (no keyword
-        # capture)
-        self.key_matcher = regex_maker(keys)
-        # progressbar
-        self.bar = None
-
-    def iter_files(self, files, start, stop, dstart):
+        """
         n = self.n_images_per_amp_file
-        # self.start = int(start)
-
         #  get list of files corresponding to frame interval (start, stop)
-        # note make sure we have native int: islice raises uninformative error
+        # make sure we have native int: itt.islice raises uninformative error
         #  with any np.integer
-        fstart = int(start // n)
-        fstop = int(np.ceil(stop / n))
-        n_1 = fstop - fstart - 1
+        frame_start = int(start // n)
+        frame_stop = int(np.ceil(stop / n))
+        n_1 = frame_stop - frame_start - 1
         start_n = start % n
-
-        yield from zip(range(fstart, fstop),  # file number
-                       itt.islice(files, fstart, fstop),  # file name
-                       itt.chain(iter((start_n,)),  # start frame in file
-                                 itt.repeat(0, n_1)),
-                       itt.chain(itt.repeat(n, n_1),  # stop frame in file
-                                 iter((((stop % n) or n),))),
-                       itt.chain(iter((dstart,)),  # start index data
-                                 range(n - start_n + dstart, stop, n)))
+        yield from zip(
+                # file number
+                range(frame_start, frame_stop),
+                # file name
+                itt.islice(files, frame_start, frame_stop),
+                # start frame in file
+                itt.chain(iter((start_n,)), itt.repeat(0, n_1)),
+                # stop frame in file
+                itt.chain(itt.repeat(n, n_1), iter((((stop % n) or n),))),
+                # start index data
+                itt.chain(iter((out_start,)),
+                          range(n - start_n + out_start, stop, n))
+        )
 
     # @profiler.histogram()
     @timer
-    def loop(self, files, start, stop, data, info, channels, progress_bar):
+    def loop(self, files, start, stop, out_start, data, info, channels,
+             progress_bar):
         """
         Loop over the files and extract the data and optional header keywords
+
+
+        Parameters
+        ----------
+        files: list
+            list of file names
+        start: int
+            starting frame index
+        stop:
+            stopping frame index
+        out_start:
+            starting index for output data
+        data
+        info
+        channels
+        progress_bar
+
+        Returns
+        -------
+
         """
 
         with tqdm(total=len(data), disable=not progress_bar, ncols=120,
                   unit='frames', unit_scale=len(channels)) as self.bar:
-            for i, filename, istart, istop \
-                    in self.iter_files(files, start, stop):
-                self.loop_inner(i, filename, istart, istop, channels, data,
-                                info)
+            for i, filename, i_start, i_stop, i_start_out in \
+                    self.iter_files(files, start, stop, out_start):
+                self.loop_file_safe(i, filename, i_start, i_stop, channels,
+                                    i_start_out, data, info)
 
         return data, info
 
     # @timer
-    def loop_mp(self, files, start, stop, dstart, data, info, channels,
+    def loop_mp(self, files, start, stop, out_start, data, info, channels,
                 progress_bar):
         """
         Loop over the files and extract the data and optional header keywords
         """
         from joblib import Parallel, delayed
+
+        # fixme: multiprocessing seems to be slower than single process
+        #  not sure why
+        n_jobs = 1  # mp.cpu_count()
+
+        # noinspection PyUnresolvedReferences
         self.bar = manager.tqdm(total=len(data), disable=not progress_bar,
-                                ncols=120, unit=' frames',
-                                mininterval=0.2, initial=dstart)
+                                ncols=120, unit=' frames', mininterval=0.2,
+                                initial=out_start)
+        # the progressbar does above does not work as a context manager with
+        # multiprocessing:
+        # _pickle.PicklingError: Can't pickle <function <lambda>:
+        # attribute lookup <lambda> on jupyter_client.session failed
 
-        # with
-        n_jobs = 2 * mp.cpu_count()
-        with Parallel(n_jobs=1) as parallel:
-            parallel(delayed(self.loop_inner)(
-                    i, filename, istart, istop, channels, dstart, data,
-                    info)
-                     for i, filename, istart, istop, dstart
-                     in self.iter_files(files, start, stop, dstart))
+        with Parallel(n_jobs=n_jobs) as parallel:
+            parallel(delayed(self.loop_file_safe)(
+                    i, filename, i_start, i_stop, channels, i_out0, data, info)
+                     for i, filename, i_start, i_stop, i_out0
+                     in self.iter_files(files, start, stop, out_start))
         self.bar.close()
-
-        # except Exception as err:
-        #     from IPython import embed
-        #     import traceback, textwrap
-        #     header = textwrap.dedent(
-        #             """\
-        #             Caught the following %s:
-        #             ------ Traceback ------
-        #             %s
-        #             -----------------------
-        #             Exception will be re-raised upon exiting this embedded interpreter.
-        #             """) % (err.__class__.__name__, traceback.format_exc())
-        #     embed(header=header)
-        #     raise
-
         return data, info
 
-    def loop_inner(self, i, filename, istart, istop, channels, dstart, data,
-                   info):
-        itr = self._index_mapper2(istart, istop, channels, dstart)
-        self._loop_safe(i, filename, itr, data, info)
+    def loop_file_safe(self, i, filename, i_start, i_stop, channels, i_out0,
+                       data, info):
+        """
+        Loop through the images in a single file and write them to `data`,
+        write the header info to the `info` array. Builtin exception trap
+        catches and logs any exceptions that might be raised
 
-    def _loop_safe(self, i, filename, itr, data, info):
+        Parameters
+        ----------
+        i: int
+            file index
+        filename: str
+            name of the file
+        i_start: int
+            starting frame relative to this file
+        i_stop: int
+            stopping frame relative to this file
+        channels: int or tuple of int
+            amplifier channels
+        i_out0: int
+            index position in output array for first frame from this file
+        data:
+            output array
+        info:
+            output array for header info
+
+        Returns
+        -------
+
+        """
+        itr = self.gen_indices(i_start, i_stop, channels, i_out0)
+
         # inner loop with exception trap
         filename = Path(filename)  # FIXME: should be read in as Paths
         name = filename.name
@@ -831,18 +984,17 @@ class _Extract(_ExtractorBase):
         try:
             self._loop_file(filename, itr, data, info)
             # print(f'\n{i}: {motley.green(name)}', end='')
-        #     # move_cursor(-1)
         except Exception as err:
             self.logger.exception(f'{i}: {motley.red(name)}')
             raise
 
     def _loop_file(self, filename, itr, data, info):
-        #
-        filesize = os.path.getsize(filename)
-        with open(filename, 'rb') as fileobj:
+        # loop through the frames in a single file and write them to `data`
+        file_size = os.path.getsize(filename)
+        with open(filename, 'rb') as file_obj:
             # since the image data is non-contiguous. Use `mmap.mmap` instead
             # of `np.memmap`
-            memmap = mmap.mmap(fileobj.fileno(), filesize,
+            memmap = mmap.mmap(file_obj.fileno(), file_size,
                                access=mmap.ACCESS_READ)
         for (j, k), byte_pos in itr:
             # extract frame
@@ -857,13 +1009,10 @@ class _Extract(_ExtractorBase):
             self.logger.debug('Done %i', j, filename.name)
 
     def _proc(self, data, j, k, mm, byte_pos):  # get_image?
-        # write to output memmap
-        image = np.frombuffer(
+        # get image from input file and write to it memmap
+        data[j, k] = np.frombuffer(
                 mm[slice(byte_pos, byte_pos + self.image_size_bytes)],
-                self.dtype).reshape(self.ishape)
-
-        # save
-        data[j, k] = image
+                self.dtype).reshape(self.image_shape)
 
     def _proc_info(self, info, j, k, mm, byte_pos, filename):
         # header for this extension (actually only need to
@@ -889,10 +1038,26 @@ class _Extract(_ExtractorBase):
         raise NotImplementedError
 
 
-class _ExtractArray(_Extract):
+class _ExtractArray(_ExtractorBase):
+    """
+    Class for extracting salticam data to numpy array using the npy format
+    """
     fileExtension = '.npy'
 
     def get_header(self, data_file, shape, original_header):
+        """
+        Create header for numpy array
+
+        Parameters
+        ----------
+        data_file
+        shape
+        original_header
+
+        Returns
+        -------
+
+        """
         # use `npy` format (see `np.lib.format.open_memmap`)
         # save file header with some meta data (shape, dtype etc) - enables
         # easy loading.
@@ -906,8 +1071,11 @@ class _ExtractArray(_Extract):
             return s, s.tell()
 
     def update_header(self, data, header, channels):
+        # noinspection PyProtectedMember
+
         # update the header for npy format so the array can easily be read
         # with np.open_memmap
+
         fmt = np.lib.format
         with open(data.filename, 'rb+') as fp:
             version = fmt.read_magic(fp)
@@ -936,7 +1104,8 @@ class _ExtractArray(_Extract):
         # remove bad frames, re-write header, fits compliance etc
         # self.logger.debug('Finalising')
         new_data = truncate_memmap(data, len(idx_rmv))
-        # remove singleton dimensions # note .squeeze() does not return memmap
+
+        # remove singleton dimensions. note .squeeze() does not return memmap
         new_data = new_data.reshape(
                 tuple((d for d in new_data.shape if not d == 1)))
         header = self.update_header(new_data, header, channels)
@@ -944,10 +1113,26 @@ class _ExtractArray(_Extract):
 
 
 class _ExtractFITS(_ExtractArray):
+    """
+    Class for extracting salticam data to FITS
+    """
+
     fileExtension = '.fits'
 
     def get_header(self, data_file, shape, original_header):
+        """
+        Create the FITS header for output
 
+        Parameters
+        ----------
+        data_file
+        shape
+        original_header
+
+        Returns
+        -------
+
+        """
         # include master header
         header = fits.Header.fromstring(original_header.decode())
         for key in ('NSCIEXT', 'NEXTEND'):  # EXTEND
@@ -988,8 +1173,7 @@ class _ExtractFITS(_ExtractArray):
 
     def finalise(self, data, header, indices_remove, channels):
         """
-        Ensure FITS compliance by padding to multiple
-
+        Ensure FITS compliance by padding to multiple of block size 2880 bytes
         """
         data, header = super().finalise(data, header, indices_remove, channels)
 
@@ -1005,28 +1189,6 @@ class _ExtractFITS(_ExtractArray):
         return data, header
 
 
+# extractor classes by file type
 EXTRACTORS = dict(npy=_ExtractArray,
                   fits=_ExtractFITS)
-
-# # test stuff
-# from pathlib import Path
-# path = Path('/media/Oceanus/UCT/Observing/data/sources/V2400_Oph/SALT/20140921/reduced/')
-# fn0 = path / 's20140921.fits'
-# fn1 = path / 'test.fits'
-#
-# hdu = fits.open(fn0, ignore_missing_end=True)
-# hdu.pop(-1)
-# hdu
-#
-# import more_itertools as mit
-#
-# s = []
-# for fn in (fn0, fn1):
-#     with fn.open('rb') as fp0:
-#         s.append(np.frombuffer(fp0.read(), dtype='S1'))
-# a, b = s
-# print('sizes', a.size, b.size)
-# n = min(a.size, b.size)
-# l = (a[:n] != b[:n])
-# w, = np.where(l)
-# w.writeto(fn1, overwrite=True)
