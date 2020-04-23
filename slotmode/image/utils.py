@@ -1,54 +1,19 @@
 import numpy as np
 import inspect
+from . import get_binning, CHIP_GAP
 
 
-def view_neighbours(image, neighbourhood=7, return_masked=None):
+def hstack(data):
     """
-    Return a view of the neighbourhood surrounding each pixel in the image.
-    The returned image will have shape (r, c, n, n) where (r, c) is the
-    original image shape and n is the size of the neighbourhood. Note that
-    the array returned by this function uses numpy's stride tricks to avoid
-    copying data and therefore has multiple elements that refer to the same
-    unique element in memory.
-
-
-    Parameters
-    ----------
-    image
-    neighbourhood
-    return_masked
-
-    Returns
-    -------
-
+    stack images from all 4 amplifier channels into single image including
+    spacing for chip gap of ~102 unbinned pixels
     """
-    from numpy.lib.stride_tricks import as_strided
 
-    n = int(neighbourhood)  # neighborhood size
-    assert n % 2, '`neighbourhood` should be an odd integer'
-
-    is_masked = np.ma.is_masked(image)
-    if is_masked:
-        image = image.filled(np.nan)
-
-    if return_masked is None:
-        return_masked = is_masked
-
-    #
-    pad_width = (n - 1) // 2
-    padding = [(0, 0)] * (image.ndim - 2) + [(pad_width, pad_width)] * 2
-    padded = np.pad(image, padding, mode='constant', constant_values=np.nan)
-
-    *d, h, w = padded.shape
-    new_shape = tuple(d) + (h - n + 1, w - n + 1, n, n)
-    new_strides = padded.strides + padded.strides[1:]
-
-    tmp = as_strided(padded, new_shape, new_strides, writeable=False)
-
-    if return_masked:
-        return np.ma.MaskedArray(tmp, np.isnan(tmp))
-
-    return tmp
+    assert data.shape[0] == 4
+    ch0, ch1, ch2, ch3 = data
+    _, b = get_binning(ch0)
+    gap = np.ma.masked_all((ch0.shape[0], int(round(CHIP_GAP / b))))
+    return np.ma.hstack([ch0, ch1, gap, ch2, ch3])
 
 
 def get_pixel_neighbourhood(ij, image, connectivity=None, ndist=1,
@@ -79,6 +44,8 @@ def get_pixel_neighbourhood(ij, image, connectivity=None, ndist=1,
     -------
 
     """
+
+    from scipy import ndimage
 
     if connectivity is None:
         # check which pixels are on
