@@ -5,7 +5,9 @@ from . import logger
 
 def pprint_header(filename, n):
     from salticam.slotmode.extract import parse_header
-    _pprint_header(*parse_header(filename), n=n)
+
+    s = pformat_header(*parse_header(filename), n=n)
+    logger.info(f'{filename}\n{s}\n')
 
 
 def _convert(header):
@@ -16,12 +18,13 @@ def _convert(header):
     raise TypeError('Invalid type for header')
 
 
-def _pprint_header(*headers, n):
+def pformat_header(*headers, n):
     """"""
     # TODO:  moon phase
 
     import motley
     from motley.table import Table
+    from motley.utils import hstack, vstack
     from recipes import pprint
 
     nh = len(headers)
@@ -67,8 +70,8 @@ def _pprint_header(*headers, n):
                       title_props=dict(bg='y', txt=txt_props))
 
     # need to convert tbl to str so the headers align properly
-    s = motley.table.hstack((str(obj_info),
-                             motley.table.vstack((obs_info, ccd_info)),
-                             prop_info))
-    logger.info(f'\n{s}\n')
-    return s, header0
+    s = hstack((str(obj_info),
+                vstack((obs_info, ccd_info)),
+                prop_info))
+
+    return s  #, header0
