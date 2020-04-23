@@ -8,11 +8,11 @@ from recipes.introspection.utils import get_module_name
 # module level logger
 logger = logging.getLogger(get_module_name(__file__))
 
-# Template for patterns matching FITS header keys
+# Template for patterns matching FITS header keys-value pair ignoring comments
 TEMPLATE_PATTERN_HEADER_KEYS = r"""
     (%s%s)          # keywords (non-capture group if `capture_keywords` False)
     \s*?=\s+        # (optional) whitespace surrounding value indicator '='
-    '?([^'\s/]*)'?  # value associated with any of the keys (un-quoted)
+    '?([^'/]*)'?  # value associated with any of the keys (un-quoted)
     """
 
 
@@ -24,15 +24,22 @@ def regex_maker(keys, capture_keywords=True, encode=True, compile=True,
 
     Parameters
     ----------
-    keys:       sequence of keys
-    capture_keywords
-    encode
-    compile
-    terse
+    keys:       str, bytes, tuple of str,
+        sequence of keys to match
+    capture_keywords:   bool, default True
+        Whether to make capture groups for the keys
+    encode:     bool, default True
+        Whether to encode the regex so it works on bytes
+    compile:    bool, default True
+        whether to compile the regex and return `_sre.SRE_Pattern` object, or
+         otherwise just return the patters str / bytes
+    terse:      bool, default False
+        If true, will strip all the verbose content (comments) in the pattern
+         and return only the regex code bits
 
     Returns
     -------
-    `_sre.SRE_Pattern`
+    str or `_sre.SRE_Pattern`
     """
 
     if keys is None or (len(keys) == 0):
@@ -48,8 +55,8 @@ def regex_maker(keys, capture_keywords=True, encode=True, compile=True,
         keys = map(bytes.decode, keys)
 
     regex_any_key = '|'.join(keys)
-    regex = TEMPLATE_PATTERN_HEADER_KEYS % \
-            (['?:', ''][capture_keywords], regex_any_key)
+    regex = (TEMPLATE_PATTERN_HEADER_KEYS %
+             (['?:', ''][capture_keywords], regex_any_key))
     if terse:
         from recipes.regex import terse
         regex = terse(regex)
