@@ -38,8 +38,8 @@ from recipes.decor.memoize import memoize
 # profiling & decorators
 from motley.profiling.timers import timer
 
-from .. import N_CHANNELS, ALL_CHANNELS, check_channels
-from ..header import _pprint_header
+from .. import N_CHANNELS, ALL_CHANNELS, CHANNEL_SIZE, check_channels
+from ..header import pprint_header
 from .utils import regex_maker, prepare_path, truncate_memmap
 
 from recipes.introspection.utils import get_module_name
@@ -54,10 +54,10 @@ try:
 except ImportError:
     # null object pattern for progressbar
     # FIXME: null object here else fail with multiprocessing and no tqdm ...
-    '''def tqdm(*args, **kwargs):
+    """def tqdm(*args, **kwargs):
         if args:
             return args[0]
-        return kwargs.get('iterable', None)'''
+        return kwargs.get('iterable', None)"""
 
 # proxy for tqdm progressbar
 SyncManager.register("tqdm", tqdm, exposed=('update', 'display', 'close'))
@@ -72,7 +72,8 @@ SRE_END = re.compile(rb'END {77}\s*')
 SRE_NAXIS = regex_maker(r'naxis(\d)')
 SRE_BITPIX = regex_maker('bitpix', capture_keywords=False)
 SRE_NEXTEND = regex_maker('nextend', capture_keywords=False)
-SRE_DATASEC = regex_maker('datasec')
+SRE_DATASEC = regex_maker('datasec', capture_keywords=False)
+SRE_BINNING = regex_maker('ccdsum', capture_keywords=False)
 
 # Regex matcher for the SALTICAM slot mode filename convention:
 # eg.:  'bxgpS201504240003.fits'
@@ -133,7 +134,7 @@ def get_indexing_info(header0, header1):
     ext_data_start = ext_head_size + len(header0)
     n_ext = get_nextend_re(header0)  # nr of fits extensions
     # NB NB!! Get BITPIX value from the first extension header not main header!
-    bitpix = int(_get_card(SRE_BITPIX, header1))
+    bitpix = int(_get_key_value(SRE_BITPIX, header1))
     # image dimensions: order of axes on an numpy array are opposite of
     # that of the FITS file.
     return (ext_data_start, ext_head_size, n_ext, bitpix,
@@ -250,22 +251,26 @@ def is_blank(image, pre_check_indices):
     return False
 
 
-def _get_card(sre, header_bytes):
+def _get_key_value(sre, header_bytes):
     mo = sre.search(header_bytes)
     if mo is None:
-        from recipes.string import matchBrackets
-        name = matchBrackets(SRE_NEXTEND.pattern.decode())[0].strip('?:')
+        from recipes.string import match_brackets
+        name = match_brackets(sre.pattern.decode())[0].strip('?:')
         raise ValueError('%s card not found!' % name)
-    return mo.group(1)
+    return mo.group(1).strip()
 
 
 def get_nextend_re(header_bytes):
-    return int(_get_card(SRE_NEXTEND, header_bytes))
+    return int(_get_key_value(SRE_NEXTEND, header_bytes))
 
 
 def get_image_shape(header):
     *_, shape = zip(*SRE_NAXIS.findall(header))
     return tuple(map(int, shape[::-1]))
+
+
+def get_binning(ext1header):
+    return list(map(int, _get_key_value(SRE_BINNING, ext1header).split(b' ')))
 
 
 def is_acquisition_image(mheader, ext1header):
@@ -276,15 +281,19 @@ def is_acquisition_image(mheader, ext1header):
     # the first extension
 
     if get_nextend_re(mheader) == 4:
-        #
+        # we have 4 extentions in the fits
         mo = SRE_DATASEC.search(ext1header)
         if mo is None:
             # 'DATASEC' not in header -- most likely an acquisition image
             return True
-
-        # # dsec = ext1header['datasec']
-        # y_extent = int(dsec.strip('[]').split(',')[1].split(':')[1])
-        # return y_extent >= CHANNEL_SIZE[1]  # acquisition image!
+        else:
+            # we get here if we have a single exposure slotmode image.  this
+            # should rarely happen, but is possible. Check if DATASEC matches
+            # slot dimensions
+            dsec = mo.group(1)
+            y_extent = dsec.decode().strip('[]').split(',')[1].split(':')[1]
+            slot_height = np.ceil(CHANNEL_SIZE[0] / get_binning(ext1header)[0])
+            return int(y_extent) != slot_height  # acquisition image!
     return False
 
 
@@ -412,7 +421,7 @@ class SlotModeExtract(LoggingMixin):
 
     def pprint(self):
         n = self.n_files * self.n_images_per_amp_file
-        _pprint_header(*self.headers, n=n)
+        pprint_header(*self.headers, n=n)
 
     def get_file_nrs(self, indices):
         """
@@ -440,7 +449,9 @@ class SlotModeExtract(LoggingMixin):
             n_dud, data_pre, info_pre = self.detect_noise_frames(channels)
             start = len(data_pre)
             data_pre = data_pre[n_dud:]
-            info_pre = info_pre[n_dud:]
+            if info_pre is not None:
+                info_pre = info_pre[n_dud:]
+
             if stop is None:
                 stop = n_frames = n_tot
             else:
@@ -457,7 +468,7 @@ class SlotModeExtract(LoggingMixin):
         self.logger.info('Using subset: %s', (start, stop))
         return shape, start, stop, data_pre, info_pre
 
-    def detect_noise_frames(self, channels, n=12, threshold=5):
+    def detect_noise_frames(self, channels, n=12, threshold=3):
         # detect initial white noise frames
         _, tmp = tempfile.mkstemp('.npy')
         _, tmp_i = tempfile.mkstemp('.info')
@@ -475,8 +486,14 @@ class SlotModeExtract(LoggingMixin):
         # simple threshold test: typically, the standard deviation of image data
         # is 10+ times larger
         std = np.std(data, (2, 3))
-        n_dud = np.where(np.all((std / std[0]) > threshold, 1))[0][0]
-        if n_dud:
+        duds = np.where(np.all((std / std[0]) > threshold, 1))[0]
+        if len(duds) == 0:
+            self.logger.warning('Could not detect any white noise frames '
+                                'amongst first %i images with sigma '
+                                'threshold of %f.1', n, threshold)
+            n_dud = 0
+        else:
+            n_dud = duds[0]
             self.logger.info('Detected %i white noise frames at the start of '
                              'the image stack. Ignoring these.', n_dud)
         return n_dud, data, info
@@ -513,10 +530,11 @@ class SlotModeExtract(LoggingMixin):
         req_bytes = req_bytes_head + req_bytes_data
 
         if free_bytes < req_bytes:
-            raise Exception('Not enough space on disc: Extraction requires '
-                            '%s, you only have %s available at location %r',
-                            pprint.eng(req_bytes, unit='b'),
-                            pprint.eng(free_bytes, unit='b'), str(self.loc))
+            raise Exception(
+                    f'Not enough space on disc: Extraction requires '
+                    f'{pprint.eng(req_bytes, unit="b")}, you only have '
+                    f'{pprint.eng(free_bytes, unit="b")} available at location '
+                    f'{str(self.loc)!r}')
 
         self.logger.info('Expected file size: %s (header: %s  + data: %s)',
                          pprint.eng(req_bytes, unit='b'),
@@ -540,7 +558,10 @@ class SlotModeExtract(LoggingMixin):
             frame that is not just white noise)
         stop: int
             requested final frame index for extraction. If not given,
-            the last useful image frame will be used (that is not just all zero)
+            the last useful image frame will be used (that is not just all
+            zero).  If given an integer while start is `None`, this is
+            interpreted as the total number of frames to extract relative to
+            the first useful image frame.
         data_file:
             output filename for data file. If not given, filename will
             automatically be created according to the `basename` attribute
@@ -562,11 +583,13 @@ class SlotModeExtract(LoggingMixin):
 
         # init output files and folders
         if data_file is None:
+            sext = ''
             if len(channels) == 1:
                 # single channel extraction. put channel number in filename
-                data_file = self.basename.with_suffix(f'.ch{channels[0]}.{ext}')
-            else:
-                data_file = self.basename.with_suffix(f'.{ext}')
+                sext += f'.ch{channels[0]}'
+            sext += f'.{ext}'
+            data_file = self.basename.with_suffix(sext)
+        #
         data_file = prepare_path(data_file, self.loc, self.overwrite)
 
         # if no header file given, and header key extraction requested
@@ -597,7 +620,8 @@ class SlotModeExtract(LoggingMixin):
         if detect_start:
             out_start = len(data_pre)  # index of starting frame for data
             data[:out_start] = data_pre
-            info[:out_start] = info_pre
+            if info is not None:
+                info[:out_start] = info_pre
         else:
             out_start = 0
 
@@ -646,12 +670,12 @@ class SlotModeExtract(LoggingMixin):
             self.logger.info('Detected %i blank images at the end of stack',
                              n_blank)
             n = len(data)
-            ignore[n - n_blank: n] = True
+            ignore[(n - n_blank):n] = True
 
         # Identify and remove bad frames at the end of run
-        if 'DATE-OBS' in info.dtype.fields.keys():
-            ut_date = info['DATE-OBS'][:, 0]
-            l1969 = (ut_date == '1969-12-31')
+        if (info is not None) and ('DATE-OBS' in info.dtype.fields.keys()):
+            # ut_date =
+            l1969 = (info['DATE-OBS'][:, 0] == '1969-12-31')
             # The last ~50 frames have this date for some reason
             ignore[l1969] = True
 
@@ -1037,6 +1061,9 @@ class _ExtractorBase(LoggingMixin):
     def finalise(self, data, header, indices_remove, channel):
         raise NotImplementedError
 
+    def get_header(self, data_file, shape, original_header):
+        raise NotImplementedError
+
 
 class _ExtractArray(_ExtractorBase):
     """
@@ -1075,18 +1102,13 @@ class _ExtractArray(_ExtractorBase):
 
         # update the header for npy format so the array can easily be read
         # with np.open_memmap
-
         fmt = np.lib.format
         with open(data.filename, 'rb+') as fp:
-            version = fmt.read_magic(fp)
-            fmt._check_version(version)
-
-            _, fortran_order, dtype = fmt._read_array_header(fp, version)
-            d = dict(descr=fmt.dtype_to_descr(dtype),
-                     fortran_order=fortran_order,
-                     shape=data.shape)
             fp.seek(0)
-            used_ver = fmt._write_array_header(fp, d, version)
+            used_ver = fmt._write_array_header(
+                    fp, dict(descr=fmt.dtype_to_descr(data.dtype),
+                             fortran_order=data.flags.f_contiguous,
+                             shape=data.shape))  # , version
 
     def finalise(self, data, header, idx_rmv, channels):
         # remove trailing frames
@@ -1139,7 +1161,7 @@ class _ExtractFITS(_ExtractArray):
             header.pop(key)
 
         # add data dimensions. just placeholders for now so we can get
-        # accurate header size before initializing memory
+        # correct header size before initializing memory
         ndim = len(shape)
         for i in range(1, ndim + 1):
             header.insert(f'NAXIS{(i - 1) or ""}', f'NAXIS{i}', 0, after=True)
