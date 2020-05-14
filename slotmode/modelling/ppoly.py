@@ -18,25 +18,23 @@ from numpy.polynomial.polynomial import polyval2d
 from scipy.interpolate import PPoly
 from scipy.special import factorial
 from scipy.optimize import minimize
-from scipy.special import binom
-from scipy.linalg import toeplitz, circulant
+# from scipy.special import binom
+from scipy.linalg import toeplitz  # , circulant
 
 # local libs
-from recipes.set import OrderedSet
+from recipes.containers.sets import OrderedSet
 from recipes.array.fold import fold
-from recipes.language import unicode
+from recipes.language.unicode import (SUP_NRS as UNICODE_SUPER,
+                                      SUB_NRS as UNICODE_SUBS
+                                      )
 from recipes import pprint
 from obstools.modelling.core import RescaleInternal
 from obstools.modelling.parameters import Parameters
 from obstools.modelling import FixedGrid, Model, CompoundModel
 
 
-# UPPER_LEFT = u'\u250c'
-# UPPER_RIGHT = u'\u2510'
-# LOWER_LEFT = u'\u2514'
-# LOWER_RIGHT = u'\u2518'
-# HORIZONTAL = u'\u2500'
-# VERTICAL = u'\u2502'
+def _echo(_):
+    return _
 
 
 def prod(x):
@@ -180,7 +178,7 @@ def get_solvable_indices(A, orders, keep_free=(), solve_high_order=True,
 
     # if solve_high_order = True
     # prefer to fit coefficients corresponding to smaller power in x
-    # (empirically found to be more stable)
+    # (empirically found to be more numerically stable for optimization)
 
     # note:
     # the block below sometimes cannot not eliminate higher powers of x
@@ -260,7 +258,15 @@ def transform_poly(coeff, scale, offset, increasing=False):
     """
     Compute coefficients for new polynomial with independent variable related
     to the old one by a simple linear transformation.
-        `x = au + b`
+        `x = α u + β`
+
+              ₙ                   ₙ
+    If p(x) = ∑ aᵢ·xⁿ⁻ⁱ = p`(u) = ∑ bᵢ·uⁿ⁻ⁱ
+             ᵢ₌₀                 ᵢ₌₀
+
+               ₙ
+    Then: bᵢ = ∑ ₙ₋ᵢCₖ·aₖ·αⁿ⁻ⁱ·βⁱ   with    ₙCₖ the binomial coefficient
+              ₖ₌₀
 
     Parameters
     ----------
@@ -275,22 +281,29 @@ def transform_poly(coeff, scale, offset, increasing=False):
     >>> scale, offset = 5, 3
     >>> a = np.polyval(coeff, x)
     >>> b = np.polyval(transform_poly(coeff, scale, offset), (x-offset) / scale)
-    >>> np.allclose(a, b)
-    Out[10]: True
+    >>> assert np.allclose(a, b)
+
 
     Returns
     -------
 
     """
+    from scipy.special import binom
+    from scipy.linalg import circulant
+
     step = [-1, 1][increasing]
     rng = np.arange(len(coeff))
     n = rng[::step, None]
+
     opwrs = np.triu(circulant(rng).T)  # powers of the offset term
     apwrs = np.tril(rng)[::-1, ::-1]  # powers of the scaling term
     b = binom(n.T, n).T  # binomial coefficients for the sequence of powers
     B = b * np.power(scale, apwrs) * np.power(offset, opwrs)
-    return np.sum(B * np.array(coeff)[None].T, 0)  # new coefficients for u
+    return np.sum(B * np.array(coeff, ndmin=2).T, 0)  # new coefficients for u
 
+
+# TODO move pprint functions to new module??
+#       also maybe ppoly2d ??
 
 def make_pnames(orders, alpha='a', increasing=False, latex=False, unicode=False,
                 nested=False):
@@ -448,7 +461,7 @@ def latex_subscript(alpha, *nrs):
 
 
 def unicode_subscript(alpha, *nrs):
-    subs = (unicode.SUB_NRS[nr] for nr in nrs)
+    subs = (UNICODE_SUBS[nr] for nr in nrs)
     return alpha + ''.join(subs)
 
 
@@ -456,82 +469,114 @@ def ascii_postscript(alpha, *nrs):
     return alpha + ''.join(map(str, nrs))
 
 
-def vector_powers(symbol, size, column=False, sep=None):
-    list_of_powers = [symbol + unicode.SUP_NRS[n] for n in range(1, size)]
-    list_of_powers = ['1'] + list_of_powers
+def vector_powers(symbol, n, column=False, squash='01', unicode=None,
+                  latex=None):
+    """
+    Get the sequence:
+        ['1', 'y', 'y²', 'y³' ... 'yⁿ']
 
-    # UPPER_LEFT = u'\u250c'
-    # UPPER_RIGHT = u'\u2510'
-    # LOWER_LEFT = u'\u2514'
-    # LOWER_RIGHT = u'\u2518'
-    # HORIZONTAL = u'\u2500'
-    # VERTICAL = u'\u2502'
+    Parameters
+    ----------
+    symbol
+    n
+    column
+    squash
 
-    if column:
-        # ensure uniform width for column vector
-        width = max(map(len, list_of_powers))
-        fmt = '\n│{:<%is}│' % width
-        white_width = (' ' * width)
-        return '┌%s┐' % white_width + \
-               ''.join(map(fmt.format, list_of_powers)) + \
-               '\n└%s┘' % white_width
+    Returns
+    -------
+
+    """
+
+    if (unicode, latex) == (None, None):
+        unicode = True  # default is to prefer unicode
+
+    if unicode:
+        latex = False
+        powers = ''.join(UNICODE_SUPER)
+        _exponent = _echo
     else:
-        sep = sep or ' '
-        return '[%s]' % sep.join(list_of_powers)
+        latex = True
+        powers = '0123456789'
+        _exponent = '^{{{}}}'.format
+
+    # nrs = '0123456789' #''.join(map(chr, range(48, 58)))
+    trans = str.maketrans('0123456789', powers, str(squash))
+
+    squash0 = ('0' in squash)
+    symbols = itt.chain(iter('1' * squash0),
+                        itt.repeat(symbol, n - squash0))
+
+    # pad out to width # todo make optional
+    w = len(symbol) + len(str(n)) + 3 * latex  # extra '^{}' characters
+    terms = np.fromiter((f'{s}{_exponent(str(i).translate(trans)): <{w}}'
+                         for i, s in enumerate(symbols)),
+                        dtype=f'U{w}')
+
+    #      make 2d
+    return terms[None].T if column else terms
 
 
-def lincombfmt(coeff, variables, precision=2, minimalist=True, expmin=None,
-               times=r'\times'):
+def lincombfmt(coeff, variables, **kws):
+    # todo remove
+
     # number of terms
     n = len(coeff)
     if isinstance(variables, str):
         variables = [variables] * n
+    variables = np.array(variables)
 
     # handle coefficient formatting
     coeff = np.asarray(coeff)
     if np.issubdtype(coeff.dtype, np.number):
         # if we have numeric coefficients
-        ignore_terms = (coeff == 0)
+        show = (coeff != 0)
+        coeff = coeff[show]
+        ones = (coeff == 1)
         # get signs of coefficients
         signs = np.take(['', '+', '-'], np.sign(coeff).astype(int))
         signs = np.char.add(signs, ' ')  # add space for aesthetic
         # convert to nice str format
+        coeff = pprint.numeric_array(np.abs(coeff), **kws)
+        coeff = np.char.strip(coeff, '$')
+        coeff[ones] = ''  # don't need to display ones (implicit) "1x" --> "x"
 
-        cfmt = np.vectorize(pprint.numeric, excluded=[1, 2, 3, 4, 5])
-        coeff = cfmt(np.abs(coeff), precision, expmin, '-', times,
-                     minimalist, False)
-
-        coeff[(coeff == '1')] = ''  # don't need to display 1s (implicit)
     else:
-        ignore_terms = np.char.str_len(coeff) == 0
-        signs = np.array(['+ '] * n)
+        show = (np.char.str_len(coeff) != 0)
+        coeff = coeff[show]
+        signs = np.array(['+ '] * len(coeff))
 
-        coeff = np.char.add(signs, coeff)
-        terms = np.char.add(coeff, variables)
-        equation = ' '.join(terms[~ignore_terms])
-        return equation.strip('+ ')
+    coeff = np.char.add(signs, coeff)
+    terms = np.char.add(coeff, variables[show])
+
+    equation = ' '.join(terms)
+    return equation.strip('+ ')
 
 
-def get_poly_repr(p, variable='x', increasing=False, precision=2,
-                  expmin=None, minimalist=True, times=r'\times'):
+# todo: similar for 2D poly
+def get_poly_equation(coeff, variable='x', increasing=False,
+                      precision=3, significant=3, log_switch=None,
+                      compact=True, times='x', unicode=None,
+                      latex=None):
     """
     Produce a latex string representing a polynomial
 
     Parameters
     ----------
     coeff : array-like
-        coefficients
+        polynomial coefficients
     variable: str
         variable name
-    increasing : bool
-        order of the powers
+    increasing : bool, default False
+        If False, (the default) the order of the coefficients are in decreasing
+        powers of x
     precision : int
         numerical precision for coefficients
-    minimalist : bool
+    compact : bool
         whether to represent floats as the shortest possible string (without
         information loss) for given precision.
-    expmin : float
-        order of magnitude at which to switch to exponential formatting for coefficients
+    log_switch : float
+        order of magnitude at which to switch to exponential formatting for
+        coefficients
     times: str
         symbol to use for multiplication in scientific representation of numbers
 
@@ -541,77 +586,143 @@ def get_poly_repr(p, variable='x', increasing=False, precision=2,
 
     Examples
     --------
-    >>> get_poly_repr([-2, -1, 2, 2.104302], minimalist=False)
+    >>> get_poly_equation([-2, -1, 2, 2.104302], compact=False)
    '- 2.00x^{3} - 1.00x^{2} + 2.00x + 2.10'
     """
 
-    # todo: handle 2D poly
+    return ' '.join(get_poly_terms(coeff, variable, increasing, precision,
+                                   significant, log_switch, compact, times,
+                                   unicode, latex))
+
+
+def get_poly_terms(c, variable='x', increasing=False,
+                   precision=3, significant=3, times='x', compact=True,
+                   log_switch=None, unicode=None, latex=None):
+    if (unicode, latex) == (None, None):
+        unicode = True  # default is to prefer unicode
+        latex = False
 
     # number of terms
-    n = len(p)
-
-    # get sequence of exponents
+    n = len(c)
     step = [-1, 1][increasing]
-    pwr = np.arange(n)[::step]
-    ignore_variable = (pwr == 0)  # since x**0 == 1
-    ignore_exp = (pwr == 1)  # exponent of 1 redundant
 
-    # convert powers to latex exponents
-    pwr = np.char.mod('^{%i}', pwr)
-    pwr[ignore_exp | ignore_variable] = ''
+    # get xⁿ terms
+    x = vector_powers(variable, n, latex=latex)
+    x[0] = ''  # replace "1" or "1^{}" factor with ""
+    x = x[::step]
 
-    # raise variable to powers
-    variables = np.array([variable] * n)
-    variables[ignore_variable] = ''
-    vpwr = np.char.add(variables, pwr)
+    # get number terms
+    zeros = (c == 0)
+    ones = (c == 1)
+    # get signs of coefficients
+    signs = np.take(['', '+', '-'], np.sign(c).astype(int))
+    signs = np.char.add(signs, ' ')  # add space for aesthetic
+    # convert to nice str format
+    c = pprint.numeric_array(np.abs(c), precision=precision,
+                             significant=significant, sign='',
+                             compact=compact,
+                             log_switch=log_switch, times=times,
+                             latex=latex, unicode=unicode)
+    c = np.char.strip(c, '$')
+    c[ones] = ''  # don't need to display ones (implicit) "1x" --> "x"
 
-    return lincombfmt(p, vpwr, precision, minimalist, expmin, times)
+    terms = np.array(list(map(''.join, zip(signs, c, x))))
+    terms[zeros] = ''
+    return terms
 
 
-def get_ppoly_repr(coeff, breakpoints,
-                   name='f', variable='x',
-                   increasing=False, onedomain=True,
-                   precision=2, minimalist=True, expmin=None,
-                   times=r'\cdot'):
+def get_latex_equation(coeff, breakpoints,
+                       name='f', variable='x',
+                       increasing=False, onedomain=True, compact=False,
+                       # number formatting options follow
+                       precision=3, significant=3, times='x', terse=True,
+                       log_switch=None):
     """
-    Produce a latex string representing a polynomial
+    Produce a latex equation representing a polynomial
 
     Parameters
     ----------
     coeff : array-like (N, M)
         block of coefficients for N equations of degree M
+    name: str
+        name of the function
     variable: str
         variable name
     increasing : bool
         order of the powers
     precision : int
         numerical precision for coefficients
-    minimalist : bool
-        whether to represent floats as shortest possible string for given precision
+    compact : bool
+        whether to represent floats as shortest possible string for given
+        precision
 
     Returns
     -------
     str
-
-    Returns
-    -------
-    str or IPython display object
     """
-    fmtargs = precision, expmin, minimalist, times
 
-    # create piecewise latex equation
-    intervals = mit.pairwise(breakpoints)
-    rep = r'%s\left(%s\right) = \begin{cases}' % (name, variable)
-    for i, (p, intr) in enumerate(zip(coeff, intervals)):
-        if not onedomain:  # give each indep. variable a subscript
-            variable = '%s_{%i}' % (variable, i)
-            intr = (0, np.diff(intr)[0])
+    # assert environ in ('cases', 'array')
 
-        eq = get_poly_repr(p, variable, increasing, *fmtargs)
-        i0, i1 = (pprint.numeric(_, *fmtargs, latex=False) for _ in intr)
-        rep += r'%s &\mbox{if } %s \leq %s < %s \\' % (eq, i0, variable, i1)
-    rep += '\end{cases}'
+    nr_format = dict(precision=precision, significant=significant,
+                     log_switch=log_switch, compact=terse,
+                     times=times)
+
+    n, m = coeff.shape
+    intervals = fold(breakpoints, 2, 1, pad=False)
+    if onedomain:
+        # each variable has its own domain starting from (0, ...)
+        # this is the default coordinate system for coeff of
+        # `scipy.interpolation.PPoly`
+        new_coeff = np.empty_like(coeff)
+        for i, c in enumerate(coeff):
+            new_coeff[i] = transform_poly(c, 1, breakpoints[i])
+        coeff = new_coeff
+        variables = [variable] * n
+        vname = variable
+    else:
+        # give each indep. variable a subscript
+        variables = [f'{variable}_{{{i}}}' for i in range(n)]
+        vname = ', '.join(variables)
+        intervals = intervals - intervals[:, [0]]
+
+    # create piecewise latex equation using "array" environment
+    # add newlines so we can copy paste to latex and still have nice formatting
+    # TODO: bonus points for aligning terms in latex!!
+    #  can do with motley.table
+    rep = '$$\n'
+    rep += rf'{name}\left({vname}\right) = \left\{{ \begin{{array}}'
+
+    if compact:
+        sep, ncols = ' ', 6
+    else:
+        sep, ncols = ' & ', m + 4
+
+    rep += '{*{%d}{r}}' % ncols
+    rep += '\n'
+    for i, (p, v, inter) in enumerate(zip(coeff, variables, intervals)):
+        terms = get_poly_terms(p, v, increasing, **nr_format)
+
+        i0, i1 = pprint.numeric_array(inter, **nr_format, latex=False)
+        rep += ' & '.join((sep.join(terms),
+                           r'\mbox{{for }} ',
+                           rf'{i0} {sep} \leq {v} < {sep} {i1}\\ ' + '\n'))
+
+    rep += rf'\end{{array}}\right.'
+    rep += '\n$$'
     return rep
+
+
+def display_eq(eq, fontsize=20):
+    from matplotlib import rc
+    from matplotlib.texmanager import TexManager
+    from IPython.display import Image
+
+    rc("text.latex", preamble=r'\usepackage{amsmath}')
+    #
+    tm = TexManager()
+    im = Image(filename=tm.make_png(eq, fontsize, 72))
+    rc("text.latex", preamble='')  # restore preamble state
+    return im
 
 
 # TODO:
@@ -619,18 +730,20 @@ def get_ppoly_repr(coeff, breakpoints,
 
 
 def repr_matrix_product(coeff):
-    c = str(coeff)
-    yo, xo = multi_order = coeff.shape
-    ypr, xpr = map(vector_powers, 'yx', multi_order, (0, 1))
+    # c = pprint.matrix(coeff)
+    yo, xo = coeff.shape  # multi_order
+    ypr, xpr = (pprint.nrs.matrix(vector_powers(*_))
+                for _ in zip('yx', (yo, xo), (0, 1)))
+    # ypr, xpr = map(pprint.nrs.matrix,
+    #                map(vector_powers, 'yx', (yo, xo), (0, 1)))
     skip_lines = (yo // 2) - int(not (yo % 2))
-    # pre_space = ' ' * (len(ypr) + 1)
-    # zip([''] + ypr.splitlines(), [''] + c.splitlines(), xpr.splitlines())
 
-    y_space = len(ypr)
+    y_space = ypr.index('\n')
+    c = pprint.matrix(coeff)
     c_space = max(map(len, c.splitlines()))
 
-    ylist = [''] * (skip_lines + 1) + [ypr]
-    clist = [''] + c.splitlines()
+    ylist = [''] * skip_lines + ypr.splitlines()
+    clist = c.splitlines()
     xlist = xpr.splitlines()
     lines = []
     for ys, cs, xs in itt.zip_longest(ylist, clist, xlist, fillvalue=''):
@@ -638,6 +751,16 @@ def repr_matrix_product(coeff):
                 '{:{}s} {:{}s} {:s}'.format(ys, y_space, cs, c_space, xs)
         )
     return '\n'.join(lines)
+
+
+def repr_sum(coeff):
+    s = '''\
+        %s %s
+         ∑ cᵢⱼ·𝑦ⁱ𝑥ʲ
+        ᵢ ⱼ\
+        ''' % tuple(UNICODE_SUBS[n] for n in coeff.shape[::-1])
+    # ᵢ₌₀ ⱼ₌₀
+    return textwrap.dedent(s)
 
 
 # TODO: move to modelling.core ?????
@@ -899,6 +1022,7 @@ class PiecewisePolynomial(object):  # Spline1dBase
         if len(p) != n_ok:
             raise ValueError('%r takes %i free parameters, %i given.'
                              % (self.__class__.__name__, n_ok, len(p)))
+        return p
 
     def __call__(self, p, grid):
         """
@@ -1047,6 +1171,7 @@ class PiecewisePolynomial(object):  # Spline1dBase
     def get_repr(self, coeff, name='f', variable='x', increasing=False,
                  onedomain=False, precision=2, minimalist=True, expmin=None,
                  times='\cdot'):
+        # FIXME!!
         """
         Produce a latex string representing a polynomial
 
@@ -1076,7 +1201,7 @@ class PiecewisePolynomial(object):  # Spline1dBase
         coeff = np.asarray(coeff)
         if np.issubdtype(coeff.dtype, np.number):
             # numerical coefficients
-            block = self.get_block_coeff(coeff, onedomain)
+            block = self.get_block_coeff(coeff)
         else:
             # str coefficients (parameter names)
             # get expression for derived coefficients
@@ -1095,9 +1220,9 @@ class PiecewisePolynomial(object):  # Spline1dBase
             iy, ix = self.coeff_map[:, self.ix_free]
             block[iy, ix] = coeff
 
-        return get_ppoly_repr(block.T, self.breakpoints, name, variable,
-                              increasing, onedomain, precision, minimalist,
-                              expmin, times)
+        return get_latex_equation(block.T, self.breakpoints, name, variable,
+                                  increasing, onedomain, precision, minimalist,
+                                  expmin, times)
 
     def get_constrained(self, p):
         """
@@ -1118,8 +1243,8 @@ class PiecewisePolynomial(object):  # Spline1dBase
     def get_block_coeff(self, p):
         """
         Get the full set of coefficients for all the polynomials as an MxN
-        array (where M is the number of polynomials (pieces) and N is the
-        degree of the highest order polynomial.  Those coefficients which can
+        array, where M is the degree of the highest order polynomial and N is
+        the  number of polynomials (pieces). Those coefficients which can
         be algebraically determined by the constraints are filled. This set of
         coefficients returned by this method can be passed to
         `scipy.interpolation.PPoly` to construct a smooth piecewise polynomial
@@ -1135,18 +1260,10 @@ class PiecewisePolynomial(object):  # Spline1dBase
         coeff : array
         """
 
-        # coeff = np.zeros(self._coeff_shape)
         coeff = self._coeff
         coeff[self._ix_free] = p
         coeff[self._ix_solve] = self.get_constrained(p)
         # coeff[self._ix_const] = self.const_vals
-
-        # TODO: move this block elsewhere
-        # if onedomain:  #(, onedomain=False)
-        #     s = 1  # / self._gridscale
-        #     for i, c in enumerate(coeff):
-        #         o = -self.breakpoints[i]  #
-        #         coeff[i] = transform_poly(c, s, o)
 
         return coeff
 
@@ -1201,7 +1318,7 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
                  scale_x=True, scale_y=True, fit_breakpoints=False,
                  coeff_name_base='a', solve_high_order=True, nbc=None):
         """
-        Make it so we can fit breakpoints
+        Allow fitting breakpoints
 
         Parameters
         ----------
@@ -1218,7 +1335,7 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
                                      solve_high_order, nbc)
         #
         self.fit_breakpoints = fit_breakpoints
-        self.static_grid = None
+        # self._grid = None
         self.breakpoints0 = self.breakpoints.copy()
         self._var_bp = self.breakpoints.copy()
 
@@ -1253,8 +1370,9 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
         # note: This method expects flattened parameter array
         # split parameters into coeff, breakpoints
         if self.fit_breakpoints:
-            p, bp = np.split(p, super().dof)
+            p, bp = np.split(p, [super(PPolyModel, self).dof])
             self.breakpoints[1:-1] = bp
+
         return self._evaluate_var_bp(p, grid, self.breakpoints)
 
     def _evaluate_var_bp(self, p, grid, breakpoints):
@@ -1267,8 +1385,8 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
 
         return self._evaluate_fast(p, grid, breakpoints)
 
-    def get_bounds(self, inf=None, bpv=0.35):
-        """layperson speak for uniform priors"""
+    def get_bounds(self, inf=None, delta=2):
+        """These represent the assumption of uniform priors"""
 
         if not self.fit_breakpoints:
             return
@@ -1281,21 +1399,20 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
             raise ValueError
 
         bounds = [unbound] * self.dof
-        bpb = self.get_bp_bounds(bpv)
+        bpb = self.get_bp_bounds(delta)
         bounds[-len(bpb):] = bpb
         return bounds
 
-    def get_bp_bounds(self, bpv=0.35):
+    def get_bp_bounds(self, delta=2):
         # using (0, 1) here may lead to singular (non-invertible) system
         # each breakpoint parameter is now allowed to vary on a bounded
         # interval surrounding the initial value so long as it does not
         #  cross more than halfway the distance to its neighbouring
         # breakpoint, or fall outside the interval (0, 1).
-        assert bpv < 0.5
-        bp = self.breakpoints
-        v = np.diff(bp) * bpv
-        δ = fold(v, 2, 1) * [-1, 1]
-        return tuple(bp[None, 1:-1].T + δ)
+        # assert bpv < 0.5
+        # bp = self.breakpoints
+        return tuple(self.breakpoints[None, 1:-1].T
+                     + np.multiply(delta / self._xscale, [-1, 1]))
 
     def p0guess(self, *args, nested=False):
 
@@ -1358,13 +1475,9 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
 
         if self.fit_breakpoints:
             n_free_breaks = len(self.breakpoints) - 2
-            breakpoint_names = [('bp%i' % i) for i in range(n_free_breaks)]
+            breakpoint_names = [f'bp{i}' for i in range(n_free_breaks)]
 
-            if nested:
-                aggregate = names.append
-            else:
-                aggregate = names.extend
-
+            aggregate = getattr(names, 'append' if nested else 'extend')
             aggregate(breakpoint_names)
 
         return names
@@ -1373,25 +1486,33 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
                          modRes=500):
         # TODO suppress UserWarning: Warning: converting a masked element to nan
         import matplotlib.pyplot as plt
-        from recipes.pprint import sci_repr
+        from recipes.pprint import nrs
+
+        def gof_text(stat, name, xpos=0):
+            v = stat(p, data, grid, std)
+            s = nrs.nr(v, significant=3, latex=True)
+            txt = '$%s = %s$' % (name, s.strip('$'))
+            # print(txt)
+            return axTxt.text(xpos, 0.05, txt, fontsize=14, va='bottom',
+                              transform=axTxt.transAxes)
 
         # fig = mdl.plot_fit_results(image, params[mdl.name], modRes)
         # figs.append(fig)
 
         # plot fit result
-        fig, axes = plt.subplots(3, 1, figsize=(10, 8),
+        fig, axes = plt.subplots(3, 1,
+                                 figsize=(10, 8),
+                                 sharex=True,
                                  gridspec_kw=dict(hspace=0,
-                                                  height_ratios=(3, 1, 0.2)),
-                                 sharex=True)
+                                                  height_ratios=(0.25, 3, 1)))
+        axTxt, axMdl, axResi = axes
 
-        axMdl, axResi, axTxt = axes
-
-        # scale data
+        # scale data,
         data = data * yscale
         if std is not None:
             std = std * yscale
         if grid is None:
-            grid = self.static_grid
+            grid = self.grid
 
         gsc = grid * self._xscale
 
@@ -1408,7 +1529,7 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
         data_colour = 'royalblue'
         ebMdl = axMdl.errorbar(gsc, data, std,
                                fmt='o', color=data_colour, zorder=10,
-                               label='Median $\pm$ (MAD)')
+                               label=r'Median $\pm$ (MAD)')
 
         # residuals
         res = data - self(p, grid) * np.sqrt(yscale)
@@ -1420,27 +1541,22 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
             p = p.view((float, p.npar))
 
         self._check_params(p)
-        if self.fit_breakpoints:
-            bp = p[-self.npoly:]
-        else:
-            bp = self.breakpoints
 
         # breakpoints
+        bp = p[1 - self.npoly:] if self.fit_breakpoints else self.breakpoints
         breakpoints = bp * self._xscale
-        lineCols = []
-        for ax in axes[:2]:
-            lines_bp = ax.vlines(breakpoints, 0, 1,
-                                 linestyle=':', color='0.2',
-                                 transform=ax.get_xaxis_transform(),
-                                 label='Break points')
-            lineCols.append(lines_bp)
+        lineCols = [ax.vlines(breakpoints, 0, 1,
+                              linestyle=':', color='0.2',
+                              transform=ax.get_xaxis_transform(),
+                              label='Break points')
+                    for ax in axes[1:]]
 
-        #
-        axMdl.set_title(('%s Fit' % self.name))  # .title())
+        # axes labels
+        axTxt.set_title(f'{self.name} Fit', dict(fontweight='bold'))
         axMdl.set_ylabel('Counts (ADU)')
+        axResi.set(xlabel='pixels',
+                   ylabel='Residuals')
         axMdl.grid()
-
-        axResi.set_ylabel('Residuals')
         axResi.grid()
 
         # ylims
@@ -1459,90 +1575,21 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
         # Remove all spines, ticks, labels, etc for `axTxt`
         axTxt.set_axis_off()
 
-        def gof_text(stat, name, xpos=0):
-            v = stat(p, data, grid, std)
-            s = sci_repr(v, latex=True).strip('$')
-            txt = '$%s = %s$' % (name, s)
-            # print(txt)
-            return axTxt.text(xpos, 0, txt, fontsize=14, va='top',
-                              transform=axTxt.transAxes)
-
-        funcs = self.redchi, self.rsq, self.aic, self.aicc
-        names = (r'\chi^2_{\nu}', 'R^2', 'AIC', 'AIC_c')
-        positions = (0, 0.25, 0.5, 0.75)
-        texts = []
-        for f, name, xpos in zip(funcs, names, positions):
-            txt = gof_text(f, name, xpos)
-            texts.append(txt)
+        positions = np.linspace(0, 1, 4, endpoint=False) + 0.05
+        texts = [gof_text(f, name, xpos)
+                 for xpos, (f, name) in
+                 zip(positions, {self.redchi: r'\chi^2_{\nu}',
+                                 self.rsq: 'R^2',
+                                 self.aic: 'AIC',
+                                 self.aicc: 'AIC_c'}.items())]
 
         # turn the ticks back on for the residual axis
         for tck in axResi.xaxis.get_major_ticks():
-            tck.label1On = True
+            tck.label1.set_visible(True)
 
         fig.tight_layout()
-
-        art = ebars, line_mdl, lineCols, texts
-        return art
-
-        # # plot fit result
-        # import matplotlib.pyplot as plt
         #
-        # fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8),
-        #                                sharex=True,
-        #                                gridspec_kw=dict(hspace=0,
-        #                                                 height_ratios=(3, 1)))
-        #
-        # # get data
-        # i = 'yx'.index(self.name)
-        # # axs = 'yx'[i]
-        # grid, data, uncertainty = g, d, e = get_cross_section_data(image, i)
-        # gplot = g * len(data)
-        # scale = 1  # np.ma.median(data)
-        #
-        # # plot fitted data
-        # ebc = ax1.errorbar(gplot, d, e, fmt='mo', zorder=10,
-        #                    label='Median $\pm$ (MAD)')
-        #
-        # # plot rows / column data
-        # pixels = image / scale
-        # if i == 1:
-        #     pixels = pixels.T
-        #
-        # lines = ax1.plot(gplot, pixels, 'g', alpha=0.35, label='Data')
-        #
-        # # breakpoints
-        # # print(axs, 'breaks', db.model[axs].breakpoints)
-        # breakpoints = self.breakpoints * len(data)  # * g.max()
-        # lines_bp = ax1.vlines(breakpoints, 0, 1,
-        #                       linestyle=':', color='0.2',
-        #                       transform=ax1.get_xaxis_transform(),
-        #                       label='Break points')
-        #
-        # # model
-        # p = params.squeeze()
-        # gm = np.linspace(0, 1, modRes)  # bg.shape[not bool(i)]
-        # dfit = self(p, gm) * np.sqrt(np.ma.median(data))
-        # lines_mdl, = ax1.plot(gm * len(data), dfit, 'r-', label='model')
-        #
-        # # plot model residuals
-        # res = data - self(p, grid) * np.sqrt(np.ma.median(data))
-        # ax2.errorbar(gplot, res, e, fmt='mo')
-        # # percentile limits on errorbars (more informative display for large errorbars)
-        # lims = np.percentile(res - e, 25), np.percentile(res + e, 75)
-        # ax2.set_ylim(*lims)
-        #
-        # ax1.set_title(('%s cross section fit' % self.name).title())
-        # ax1.set_ylabel('Normalized Counts')
-        # legArt = [ebc, lines[0], lines_mdl, lines_bp]
-        # legLbl = [_.get_label() for _ in legArt]
-        # ax1.legend(legArt, legLbl)
-        # ax1.grid()
-        #
-        # ax2.set_ylabel('Residuals')
-        # ax2.grid()
-        #
-        # fig.tight_layout()
-        # return fig
+        return ebars, line_mdl, lineCols, texts  # art
 
     def animate_fit(self, p0, data, grid=None, std=None, **kws):
 
@@ -1570,7 +1617,7 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
         """
         import time
         from matplotlib.animation import FuncAnimation
-        from recipes.pprint import sci_repr
+        from recipes.pprint import nrs
 
         # plot the result
         ebars, line_mdl, lineCols, chiTxt = \
@@ -1618,7 +1665,7 @@ class PPolyModel(FixedGrid, PiecewisePolynomial, RescaleInternal, Model):
             # update text
             frame_txt.set_text(frame_fmt % i)
             rchisq = self.redchi(p, data, grid)
-            txt = sci_repr(rchisq, latex=True)
+            txt = nrs.numeric(rchisq, latex=True)
             txt = txt.replace('$', '$\chi^2_r = ', 1)
             chiTxt.set_text(txt)
 
@@ -2178,15 +2225,17 @@ class Poly2D(FixedGrid, Model):
 
     def __init__(self, multi_order):
         """
-        A fittable 2-dimensional polynomial
+        A fittable 2-dimensional polynomial.
 
         Parameters
         ----------
         multi_order: 2-tuple of int
-            The order / degree of the polynomial along each dimension. i.e. The
-            dimensions of the coefficient matrix less one.
+            The order / degree of the polynomial along each dimension.
+            i.e. The dimensions of the coefficient matrix less one.
 
         """
+        # TODO: attributes
+
         self.n_coeff = self.coeff = self.free = None  # place holders for init
         self.set_orders(multi_order)
         self._yixj = None
@@ -2205,15 +2254,6 @@ class Poly2D(FixedGrid, Model):
 
     def __repr__(self):
         return '%s%s' % (self.__class__.__name__, tuple(self.n_coeff - 1))
-
-    def _repr_sum(self):
-        s = '''\
-            %s %s
-             ∑ cᵢⱼ·𝑦ⁱ𝑥ʲ
-            ᵢ ⱼ\
-            ''' % tuple(unicode.SUB_NRS[n] for n in self.n_coeff[::-1])
-        # ᵢ₌₀ ⱼ₌₀
-        return textwrap.dedent(s)
 
     def set_orders(self, multi_order):
 
@@ -2425,10 +2465,12 @@ class PPoly2D(Poly2D):  #
                 raise TypeError(
                         'Neighbouring polynomials should be `None` or `PPoly2D`'
                         ' instances, not %r.' % o.__class__.__name__)
+
             # set neighbours as object attributes
             setattr(o, 'depends_on', self)
             setattr(self, s, o)
             l = self.continuous + self.smooth
+
             if s in ['left', 'right']:
                 o._tied_rows_cols = (0, l)  # (slice(None), slice(l, None))
             else:
@@ -2438,7 +2480,7 @@ class PPoly2D(Poly2D):  #
         self.apply_bc()
         self.set_freedoms()
 
-    def set_freedoms(self):
+    def set_freedoms(self):  # todo better name. update_neighbours?
         for i in range(self.smooth + self.continuous):
             # set coefficients for x-only terms
             if self.top:
@@ -2611,7 +2653,7 @@ def _check_orders_knots(orders, knots):
     return np.array(orders, int), np.asarray(knots)
 
 
-from recipes.dict import AttrReadItem
+from recipes.containers.dicts import AttrReadItem
 
 
 class PolyNeighbours(AttrReadItem):
@@ -2658,8 +2700,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
     Two-dimensional polynomial object that shares a boundary with
     another neighbouring 2d polynomial.
 
-    Automatically update the coefficient
-    matrix for dependent polynomials.
+    Automatically update the coefficient matrix for dependent polynomials.
 
     Dependent polys have restricted parameter spaces. These constraints are
     imposed by (optional) continuity and smoothness conditions on the boundary
@@ -2685,7 +2726,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
         # neighbours
         self.neighbours = PolyNeighbours()
-        self.depends_on = None
+        self.depends_on = []
         self.domain = np.array(domain)
         # self._domain_mask = None
         # self.origin = 0 # np.array([[0], [0]])
@@ -2694,7 +2735,7 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         # set boundary conditions flags
         self.continuous = bool(continuous)
         self.smooth = bool(smooth) or self.continuous  # smooth if continuous
-        self._tied_rows_cols = (0, 0)
+        self._tied_rows_cols = [0, 0]
 
         # set parameter freedom
         self.set_freedoms()
@@ -2703,60 +2744,57 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
         p = self._check_params(p)
 
+        # print('call starts', grid)
+
         if grid is None:
             # get static grid if available.  Assume here internal grid is
             # already correct domain and form for `eval`.  Checks done inside
             # `_check_grid`
             grid = self._check_grid(grid)
             domain_mask = self._domain_mask
-        else:
-            # external grid provided.  Select domain
+        elif grid is not self.grid:
+            # external grid provided.  Select domain.
             grid, domain_mask = self.get_domain_mask(grid)
             grid = self.domain_transform(grid)
 
-        y = self(p, grid)
+        # print('delegate', grid)
+        y = super().__call__(p, grid)
 
         if out is not None:
             out[domain_mask] = y
         return y
+
+    def _checks(self, p, grid, *args, **kws):
+        return super()._checks(p, grid, *args, **kws)
 
     def set_grid(self, grid):
         # transform domain
         self._domain_mask = m = self.get_domain_slice(grid)
         Poly2D.set_grid(self, self.domain_transform(grid[m]))
 
-    def _gen_domain_mask(self, grid):
-        # for each dimension in grid, yield domain mask
-
-        # The operators used below to check which points fall within the
-        # domain of the function depend on the position of the polynomial.
-        # The Convention used here is that models are defined on the interval
-        # that is closed at the bottom and open at the top, except for the
-        # top-most polys which have domain on closed y interval and right-most
-        # polys which have domain on closed x interval
-
-        import operator as op
-
-        sem = [['bottom', 'top'], ['left', 'right']]
-        ops = (op.lt, op.le)
-        for i, (yx, (lo, hi)) in enumerate(zip(grid, self.domain)):
-            op1, op2 = (ops[bool(self.neighbours.get(key))] for key in sem[i])
-            m = op1(lo, yx) & op2(yx, hi)
-            yield m
-
     def get_domain_mask(self, grid):
         # isolate points within the domain of this model from an arbitrary grid
-        # of points.  This function returns the domain mask as a tuple of
-        # slices so that the grid remains shaped
+        # of points.
+
+        # The operators used below to check which points fall within the
+        # domain of the function, depend on the position of the polynomial in
+        # the spline layout.
+
+        # The convention used here is that models are defined on the interval
+        # that is closed at the bottom/left and open at the top/right.
+        # This doesn't really matter for the case of continuous,
+        # smooth polys, but does matter otherwise since the value of the
+        # neighbouring polys and their derivatives will differ at the boundary
+
         if self.domain is None:
             return ...
 
-        # lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
-        return np.all(list(self._gen_domain_mask(grid)), 0)
+        lo, hi = self.domain[(None,) * (grid.ndim - 1)].T
+        # noinspection PyUnresolvedReferences
+        return (lo <= grid) & (grid < hi)  # .all(0)
 
         # return m
-        # noinspection PyUnresolvedReferences
-        # return ((lo <= grid) & (grid <= hi)).all(0)
+        # return (op.le(lo, grid) & op.lt(grid, hi)).all(0)
 
     def get_domain_slice(self, grid):
         """
@@ -2764,7 +2802,8 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         which the function is defined. Return the tuple of slice objects that
         can be used to get the associated grid points
         """
-
+        # This function returns the domain mask as a tuple of slices so that
+        # the grid remains shaped
         if self.domain is None:
             return ...
 
@@ -2773,24 +2812,10 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
         # b = list()
         # fixme, if you know the grid is uniform and sorted this can be done
         #  faster
-        try:
-            return (...,) + tuple(
-                    slice(*(np.nonzero(b.any(int(not i)))[0][[0, -1]]))
-                    for i, b in enumerate(self._gen_domain_mask(grid)))
-        except Exception as err:
-            from IPython import embed
-            import traceback
-            import textwrap
-            embed(header=textwrap.dedent(
-                """\
-                Caught the following %s:
-                ------ Traceback ------
-                %s
-                -----------------------
-                Exception will be re-raised upon exiting this embedded interpreter.
-                """) % (err.__class__.__name__, traceback.format_exc()))
-            raise
 
+        return (...,) + tuple(
+                slice(*(np.nonzero(b.any(int(not i)))[0][[0, -1]] + [0, 1]))
+                for i, b in enumerate(self.get_domain_mask(grid)))
 
     def set_coeff(self, p):
         super().set_coeff(p)
@@ -2814,20 +2839,20 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
             # powers xⁱ·yʲ
             j, i = np.ogrid[tuple(map(slice, (k, k), self.n_coeff))]
 
-            for name, poly in self.neighbours.items():
+            for pos, poly in self.neighbours.items():
                 # set coefficients for x-only terms
-                if name == 'bottom':
+                if pos == 'bottom':
                     poly.coeff[k] = c[k]
 
                 # set coefficients for y-only terms
-                if name == 'left':
+                if pos == 'left':
                     poly.coeff[:, k] = c[:, k]
 
-                if name == 'top':  # x-only terms
+                if pos == 'top':  # x-only terms
                     poly.coeff[k] = np.sum(
                             c[k:] * (j ** k) * y1 ** (j - k), 0)
 
-                if name == 'right':  # y-only terms
+                if pos == 'right':  # y-only terms
                     poly.coeff[:, k] = np.sum(
                             c[:, k:] * (i ** k) * x1 ** (i - k), 1)
 
@@ -2836,13 +2861,13 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
             self.neighbours[s] = o
 
             # set neighbours as object attributes
-            setattr(o, 'depends_on', self)
+            o.depends_on.append(self)
             # setattr(self, s, o)
             l = self.continuous + self.smooth
             if s in ['left', 'right']:
-                o._tied_rows_cols = (0, l)  # (slice(None), slice(l, None))
+                o._tied_rows_cols[1] = l  # (slice(None), slice(l, None))
             else:
-                o._tied_rows_cols = (l, 0)  # (slice(l, None), slice(None))
+                o._tied_rows_cols[0] = l  # (slice(l, None), slice(None))
 
         # set the tied coefficients in neighbouring polys
         self.apply_bc()
@@ -2850,12 +2875,262 @@ class PPoly2D_v2(Poly2D, DomainTransformMixin):  #
 
     def set_freedoms(self):
         n_tied = self.smooth + self.continuous
-        for name, poly in self.neighbours.items():
+        for pos, poly in self.neighbours.items():
             for i in range(n_tied):
                 # set coefficients for x-only terms
-                if name in ('top', 'bottom'):
+                if pos in ('top', 'bottom'):
                     poly.free[i] = False
 
                 # set coefficients for y-only terms
-                if name in ('left', 'right'):
+                if pos in ('left', 'right'):
                     poly.free[:, i] = False
+
+    def order_search(self, data, std=None, max_dof=np.inf,
+                     gof=('aic', 'bic', 'redchi'), report=False, **opt_kws):
+        """
+
+        Parameters
+        ----------
+        data
+        std
+        max_dof
+        gof
+        report
+        opt_kws
+
+        Returns
+        -------
+
+        """
+        for g in gof:
+            assert hasattr(self, g), (f'Goodness-of-fit statistic {g} not '
+                                      'understood.')
+
+        # n = np.prod(self.n_coeff - self._tied_rows_cols)
+        results = []  # np.ma.masked_all((n,) + self.coeff.shape)
+        free = []
+        goodness = defaultdict(list)  # np.ma.masked_all((n, len(gof)))
+        selector = gof[0]
+        # reps = []
+
+        # clean slate
+        self.free[:] = False
+
+        best = np.inf
+        ibest = None
+        cbest = np.zeros(self.n_coeff)
+
+        i = 0
+        for i, freedom in enumerate(ParamSubspaces(self).iter_blocks(max_dof)):
+            # print(i, free.sum() )
+            # free some params
+            # ensure the boundary conditions are met
+            self.coeff[~freedom] = 0
+            self.free = freedom
+            for parent in self.depends_on:
+                parent.apply_bc()
+
+            # start at current best optimum
+            p0 = cbest[freedom]
+
+            # fit
+            # self.logger.info('%s: \n%s', i, reps[-1])
+            r = self.fit(data, self.grid, p0=p0, **opt_kws)
+            self.logger.debug('r = %s', r)
+
+            free.append(freedom.copy())
+            results.append(r if r is None else self.coeff[self.free])
+            for g in gof:
+                if r is None:
+                    gg = np.inf
+                else:
+                    gg = getattr(self, g)(r, data, self.grid, std)
+                goodness[g].append(gg)
+
+            # use AIC for gof test
+            g = goodness[selector][-1]
+            if g < best:
+                best, ibest = g, i
+                cbest[freedom] = r
+
+        # propagate coefficients
+        self.free = free[ibest]
+        self.coeff[~self.free] = 0
+        # ensure the boundary conditions are met
+        for parent in self.depends_on:
+            parent.apply_bc()
+
+        # set best fit params
+        self.set_coeff(results[ibest])
+
+        # log message
+        self.logger.info(
+                f'Best fit model to data with shape {data.shape}: '
+                f'{self!r} (dof={self.dof})\n'
+                f'{self!s}\n '
+                f'({i + 1} models tested)'
+        )
+
+        if report:
+            self.logger.info(
+                    f'\n{report_order_search(results, free, goodness)}')  #
+            # top=5
+
+        return results, np.array(free), goodness, ibest
+
+
+from collections import defaultdict
+
+
+def report_order_search(results, free, goodness, top=None):
+    from motley.table import Table
+    from obstools.image.segmentation import SegmentedImage
+
+    gof = list(goodness.keys())
+    goodness = np.array(list(goodness.values()))
+    aic = goodness[0]  # 'aic'
+    idx = aic.argsort()[:top]
+    idx = [i for i in idx if results[i] is not None]
+
+    goodness = goodness[:, idx]
+    aic = aic[idx]
+
+    dofs = np.empty(len(idx))
+    blocks = []
+    for i, j in enumerate(idx):
+        f = free[j]
+        dofs[i] = f.sum()
+
+        blocks.append(
+                SegmentedImage(f).format_term(show_labels=False,
+                                              origin=1, frame=False,
+                                              cmap='nipy_spectral'))
+
+    # relative likelihood
+    pref = np.exp((aic.min() - aic) / 2) * 100
+
+    footnote = None
+    if top:
+        footnote = f'{len(results) - top} more nested models...'
+
+    goodness /= goodness.max(1, keepdims=True)
+    return Table.from_columns(dofs, blocks, *goodness, pref,
+                              col_headers=np.r_[
+                                  ['dof', 'block', *gof, 'Likelihood\nratio']],
+                              precision=3, minimalist=True, order='r',
+                              # hlines=...,
+                              # highlight={ibest: 'g'}
+                              footnote=footnote
+                              )
+
+
+def print_blocks(blocks, h=None):
+    import motley
+    from obstools.image.segmentation import SegmentedImage
+
+    tables = [SegmentedImage(b).format_term(show_labels=False, origin=1,
+                                            cmap='Greens')
+              for b in blocks]
+    if h is not None:
+        tables[h] = motley.hue(tables[h])
+    if len(tables):
+        return print(motley.hstack(tables))
+    else:
+        print('EMTPY!')
+
+
+class ParamSubspaces(object):
+    """
+    Parameter subspace iteration helper for PPoly2D
+    """
+
+    def __init__(self, pp):
+        self.y0, self.x0 = pp._tied_rows_cols
+        self.y1, self.x1 = pp.n_coeff
+
+    def runner(self, free, itr, copy=False):
+        yields = np.copy if copy else _echo
+        # use this to prevent nested conditionals :)
+        for i, j in itr:
+            free[i, j] = True
+            yield yields(free)
+
+    def _get_blocks(self, iters, max_dof=np.inf, collection=None, print_=False):
+        # aggregate
+        yields = _echo
+        if print_:
+            from obstools.image.segmentation import SegmentedImage
+
+            def yields(free):
+                # representation of parameter space freedom
+                print(SegmentedImage(free).format_term(show_labels=False,
+                                                       origin=1,
+                                                       cmap='nipy_spectral'))
+                return free
+
+        #
+        for n, f in enumerate(mit.roundrobin(*iters), 1):
+            dof = f.sum()
+            if dof > max_dof:
+                continue
+            if collection is not None:
+                collection[dof].append(f.copy())
+            yield yields(f)
+
+    def iter_blocks(self, max_dof=np.inf):
+        yield from self._get_blocks(self.get_iters(), max_dof)
+
+    def get_blocks(self, max_dof=np.inf):
+        return list(self._get_blocks(self.get_iters(), max_dof))
+
+    def get_iters(self):
+        # create iterables
+
+        shape = (self.y1, self.x1)
+        free = np.zeros((self.x1 - self.x0,) + shape, bool)
+        # first those for rectangular subspaces
+        iters = []
+        for j, z in zip(range(self.x0, self.x1), free):
+            iters.append(self.runner(z, self.rect(j, self.y0, self.x0)))
+
+        # now diagonals / edges
+        free = np.zeros((3,) + shape, bool)
+        free[:, self.y0, self.x0] = True
+        free[-1, self.y0:self.y0 + 2, self.x0:self.x0 + 2] = True
+
+        idx_itrs = (self.edges(1, 1),
+                    self.dia(1, 1),
+                    itt.islice(self.edges_dia(), 2, None)
+                    )
+        iters.extend(map(self.runner, free, idx_itrs))
+        return iters
+
+    def _gen_subspaces(self, max_dof=np.inf, collection=None):
+        yield from self._get_blocks(self.get_iters(), max_dof, collection)
+
+    def get_subspaces(self, max_dof=np.inf):
+        subspaces = defaultdict(list)
+        for _ in self._gen_subspaces(max_dof, subspaces):
+            pass
+        return subspaces
+
+    def row(self, i, j=0):
+        return zip(itt.repeat(i), range(self.x0 + j, self.x1))
+
+    def col(self, j, i=0):
+        return zip(range(self.y0 + i, self.y1), itt.repeat(j))
+
+    def rect(self, j, i0=0, j0=0):
+        for i in range(i0, self.y1):
+            yield (slice(i0, i + 1), slice(j0, j + 1))
+
+    def edges(self, i0=0, j0=0):
+        for idx in zip(self.row(self.y0, i0), self.col(self.x0, j0)):
+            yield tuple(zip(*idx))
+
+    def dia(self, i0=0, j0=0):
+        return zip(range(self.y0 + i0, self.y1), range(self.x0 + j0, self.x1))
+
+    def edges_dia(self, i0=0, j0=0):
+        for idx in zip(self.row(self.y0), self.col(self.x0), self.dia(i0, j0)):
+            yield tuple(zip(*idx))
